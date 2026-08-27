@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator
 from .errors import AgentIterationLimit, ProviderError
 from .events import AgentEvent, event
 from .messages import ToolCall, tool_message
+from .permissions import AuditLogger, PermissionChecker, execute_tool_with_permissions
 from .providers import Provider
 from .tools import ToolContext, ToolRegistry, execute_tool
 
@@ -20,14 +21,21 @@ class AgentRunConfig:
 
 
 class Agent:
-    """A deterministic model/tool execution loop."""
+    """确定性的模型/工具执行循环。"""
 
     def __init__(self, provider: Provider, registry: ToolRegistry,
-                 context: ToolContext, config: AgentRunConfig | None = None) -> None:
+                 context: ToolContext, config: AgentRunConfig | None = None,
+                 permission_checker: PermissionChecker | None = None,
+                 auditor: AuditLogger | None = None,
+                 session_store=None, session_id: str = "") -> None:
         self.provider = provider
         self.registry = registry
         self.context = context
         self.config = config or AgentRunConfig()
+        self.permission_checker = permission_checker
+        self.auditor = auditor
+        self.session_store = session_store
+        self.session_id = session_id
 
     async def _complete_with_retry(self, messages: list[dict[str, Any]],
                                    emit: Any) -> Any:
@@ -82,14 +90,28 @@ class Agent:
                     for call in response.tool_calls or []:
                         emit(event("tool.requested", tool_call_id=call.id,
                                    tool_name=call.name, arguments=call.arguments))
-                        result = await execute_tool(self.registry, call, self.context)
-                        approval = "allowed" if not result.is_error else "error"
-                        emit(event("tool.approved", tool_call_id=call.id, decision=approval))
+                        if self.permission_checker is None:
+                            from .tools import execute_tool as run_tool
+                            result = await run_tool(self.registry, call, self.context)
+                            emit(event("tool.approved", tool_call_id=call.id,
+                                       decision="allowed", source="unchecked"))
+                        else:
+                            result = await execute_tool_with_permissions(
+                                self.registry, call, self.context,
+                                self.permission_checker, self.auditor,
+                            )
+                            emit(event("tool.approved", tool_call_id=call.id,
+                                       decision="denied" if result.is_error else "allowed"))
                         emit(event("tool.completed", tool_call_id=call.id,
                                    tool_name=call.name, output=result.output,
                                    is_error=result.is_error, metadata=result.metadata))
                         messages.append(tool_message(call, result.output,
                                                      is_error=result.is_error))
+                        if self.session_store and self.session_id:
+                            self.session_store.append_message(
+                                self.session_id,
+                                tool_message(call, result.output, is_error=result.is_error),
+                            )
                 emit(event("run.failed", error="maximum tool iterations reached",
                            error_type="AgentIterationLimit"))
                 raise AgentIterationLimit("maximum tool iterations reached")
