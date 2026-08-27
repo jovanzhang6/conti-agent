@@ -9,6 +9,7 @@ from .errors import AgentIterationLimit, ProviderError
 from .events import AgentEvent, event
 from .messages import ToolCall, tool_message
 from .permissions import AuditLogger, PermissionChecker, execute_tool_with_permissions
+from .tools import ToolResult
 from .providers import Provider
 from .tools import ToolContext, ToolRegistry, execute_tool
 
@@ -27,7 +28,8 @@ class Agent:
                  context: ToolContext, config: AgentRunConfig | None = None,
                  permission_checker: PermissionChecker | None = None,
                  auditor: AuditLogger | None = None,
-                 session_store=None, session_id: str = "") -> None:
+                 session_store=None, session_id: str = "",
+                 hook_engine=None) -> None:
         self.provider = provider
         self.registry = registry
         self.context = context
@@ -36,6 +38,7 @@ class Agent:
         self.auditor = auditor
         self.session_store = session_store
         self.session_id = session_id
+        self.hook_engine = hook_engine
 
     async def _complete_with_retry(self, messages: list[dict[str, Any]],
                                    emit: Any) -> Any:
@@ -52,6 +55,74 @@ class Agent:
                 emit(event("run.retry", attempt=attempt + 1, error=str(exc)))
                 await asyncio.sleep(self.config.retry_base_seconds * (2 ** attempt))
         raise last_error or ProviderError("provider failed")
+
+    def _handle_tool_result(self, call: ToolCall, result: ToolResult,
+                            messages: list[dict[str, Any]], emit: Any) -> None:
+        """统一发出工具结果、写回消息并持久化。"""
+        emit(event("tool.completed", tool_call_id=call.id,
+                   tool_name=call.name, output=result.output,
+                   is_error=result.is_error, metadata=result.metadata))
+        message = tool_message(call, result.output, is_error=result.is_error)
+        messages.append(message)
+        if self.session_store and self.session_id:
+            self.session_store.append_message(self.session_id, message)
+
+    async def _execute_call(self, call: ToolCall, emit: Any) -> ToolResult:
+        """按 权限 → 前置 Hook → 执行 → 后置 Hook 的顺序处理工具。"""
+        try:
+            tool = self.registry.get(call.name)
+        except Exception as exc:
+            return ToolResult(str(exc), is_error=True)
+
+        if self.permission_checker is None:
+            emit(event("tool.approved", tool_call_id=call.id,
+                       decision="allowed", source="unchecked"))
+        else:
+            decision = await self.permission_checker.check(
+                tool, call.arguments, self.context
+            )
+            if self.auditor:
+                self.auditor.record(
+                    "denied" if not decision.allowed else "approved",
+                    tool, call.arguments, decision, self.context,
+                )
+            emit(event("tool.approved", tool_call_id=call.id,
+                       decision="allowed" if decision.allowed else "denied"))
+            if not decision.allowed:
+                return ToolResult(f"权限拒绝：{decision.reason}", is_error=True)
+
+        before = None
+        if self.hook_engine:
+            before = await self.hook_engine.run(
+                "tool.before", call.name,
+                {"arguments": call.arguments, "tool_call_id": call.id},
+            )
+            if before and not before.allowed:
+                if self.auditor:
+                    from .permissions import Decision
+                    self.auditor.record(
+                        "denied", tool, call.arguments,
+                        Decision(False, before.message, source="hook"),
+                        self.context,
+                    )
+                return ToolResult(f"Hook 拒绝：{before.message}", is_error=True)
+            if before and before.replace_output is not None:
+                return ToolResult(before.replace_output,
+                                  {"replaced_by": "tool.before"})
+
+        from .tools import execute_tool as run_tool
+        result = await run_tool(self.registry, call, self.context)
+
+        if self.hook_engine:
+            after = await self.hook_engine.run(
+                "tool.after", call.name,
+                {"arguments": call.arguments, "tool_call_id": call.id,
+                 "output": result.output},
+            )
+            if after and after.replace_output is not None:
+                result = ToolResult(after.replace_output,
+                                    {"replaced_by": "tool.after"})
+        return result
 
     async def run(self, messages: list[dict[str, Any]]) -> AsyncIterator[AgentEvent]:
         queue: asyncio.Queue[AgentEvent | None] = asyncio.Queue()
@@ -74,6 +145,10 @@ class Agent:
                                    input_tokens=response.usage.input_tokens,
                                    output_tokens=response.usage.output_tokens))
                     messages.append(response.assistant_message())
+                    if self.session_store and self.session_id and response.has_tool_calls:
+                        self.session_store.append_message(
+                            self.session_id, response.assistant_message()
+                        )
                     emit(event("message.created", role="assistant", text=response.text,
                                tool_calls=[
                                    {"id": call.id, "name": call.name, "arguments": call.arguments}
@@ -90,28 +165,8 @@ class Agent:
                     for call in response.tool_calls or []:
                         emit(event("tool.requested", tool_call_id=call.id,
                                    tool_name=call.name, arguments=call.arguments))
-                        if self.permission_checker is None:
-                            from .tools import execute_tool as run_tool
-                            result = await run_tool(self.registry, call, self.context)
-                            emit(event("tool.approved", tool_call_id=call.id,
-                                       decision="allowed", source="unchecked"))
-                        else:
-                            result = await execute_tool_with_permissions(
-                                self.registry, call, self.context,
-                                self.permission_checker, self.auditor,
-                            )
-                            emit(event("tool.approved", tool_call_id=call.id,
-                                       decision="denied" if result.is_error else "allowed"))
-                        emit(event("tool.completed", tool_call_id=call.id,
-                                   tool_name=call.name, output=result.output,
-                                   is_error=result.is_error, metadata=result.metadata))
-                        messages.append(tool_message(call, result.output,
-                                                     is_error=result.is_error))
-                        if self.session_store and self.session_id:
-                            self.session_store.append_message(
-                                self.session_id,
-                                tool_message(call, result.output, is_error=result.is_error),
-                            )
+                        result = await self._execute_call(call, emit)
+                        self._handle_tool_result(call, result, messages, emit)
                 emit(event("run.failed", error="maximum tool iterations reached",
                            error_type="AgentIterationLimit"))
                 raise AgentIterationLimit("maximum tool iterations reached")

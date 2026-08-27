@@ -9,6 +9,7 @@ from conti_agent.agent import Agent, AgentRunConfig
 from conti_agent.errors import AgentIterationLimit, ProviderError, ToolValidationError
 from conti_agent.events import AgentEvent
 from conti_agent.messages import ToolCall, Usage, user_message
+from conti_agent.providers import urllib_transport
 from conti_agent.providers import (
     AnthropicCompatibleProvider,
     FakeProvider,
@@ -137,6 +138,32 @@ class CoreTestCase(unittest.IsolatedAsyncioTestCase):
         response = asyncio.run(call())
         self.assertEqual(captured["url"], "https://example/v1/chat/completions")
         self.assertEqual(response.tool_calls[0].name, "echo")
+
+    def test_openai_stream_request_mapping(self) -> None:
+        provider = OpenAICompatibleProvider(
+            base_url="https://example/v1", model="m", api_key="secret",
+            transport=urllib_transport,
+        )
+        captured: dict[str, Any] = {}
+        deltas: list[str] = []
+        def fake_stream(url: str, headers: dict[str, str],
+                        payload: dict[str, Any], handler) -> Any:
+            captured.update({"url": url, "payload": payload})
+            handler("text.delta", {"text": " streamed"})
+            from conti_agent.providers import ProviderResponse
+            return ProviderResponse(text="streamed")
+        provider._stream_request = fake_stream
+        registry = ToolRegistry()
+        registry.register(EchoTool())
+        async def call():
+            return await provider.complete(
+                [user_message("q")], registry,
+                lambda kind, payload: deltas.append(payload["text"]),
+            )
+        response = asyncio.run(call())
+        self.assertTrue(captured["payload"]["stream"])
+        self.assertEqual(deltas, [" streamed"])
+        self.assertEqual(response.text, "streamed")
 
     def test_anthropic_transport_mapping(self) -> None:
         def transport(url: str, method: str, headers: dict[str, str], payload: dict[str, Any]):

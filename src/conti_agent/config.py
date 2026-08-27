@@ -10,7 +10,7 @@ import tomllib
 from .errors import ConfigurationError
 
 
-VALID_PROTOCOLS = {"openai", "anthropic", "fake"}
+VALID_PROTOCOLS = {"openai", "openai-compat", "anthropic", "fake"}
 VALID_PERMISSION_MODES = {"read_only", "workspace", "approved", "trusted"}
 
 

@@ -27,16 +27,21 @@ def print_error(text: str, stream: TextIO) -> None:
 
 
 def read_multi_line(input_function: Callable[[str], str]) -> str:
-    first = input_function("conti> ")
+    first = input_function("你 > ")
     while first.endswith("\\"):
-        first = first[:-1] + "\n" + input_function("conti.. ")
+        first = first[:-1] + "\n" + input_function("  > ")
     return first
 
 
 async def run_chat(runtime: Runtime, session_id: str | None,
                    input_function: Callable[[str], str],
-                   output_function: Callable[[str], None]) -> None:
-    output_function("conti-agent chat。/help 查看命令，/exit 退出。")
+                   output_function: Callable[[str], None], *,
+                   delta_function: Callable[[str], None] | None = None) -> None:
+    info = runtime.describe()
+    output_function("conti-agent 终端对话")
+    output_function(f"模型：{info['provider']} / {info['model']}")
+    output_function(f"权限：{info['permission_mode']}    工作区：{info['workspace']}")
+    output_function("直接输入任务；/help 查看命令，/exit 退出。")
     while True:
         try:
             prompt = read_multi_line(input_function)
@@ -46,7 +51,18 @@ async def run_chat(runtime: Runtime, session_id: str | None,
         if prompt.strip() == "/exit":
             return
         if prompt.strip() == "/help":
-            output_function("命令：/sessions、/resume <id>、/compact、/exit")
+            output_function("命令：/new、/status、/sessions、/resume <id>、/compact、/exit")
+            continue
+        if prompt.strip() == "/new":
+            session_id = None
+            output_function("已开启新会话。")
+            continue
+        if prompt.strip() == "/status":
+            for key, value in info.items():
+                if key == "tools":
+                    output_function(f"{key}: {len(value)} 个")
+                else:
+                    output_function(f"{key}: {value}")
             continue
         if prompt.strip() == "/sessions":
             for item in runtime.sessions.list():
@@ -66,10 +82,24 @@ async def run_chat(runtime: Runtime, session_id: str | None,
             continue
         if not prompt.strip():
             continue
-        final, session_id, _ = await runtime.ask(
-            prompt, session_id=session_id, output_format="text"
+        output_function("助手：")
+        streamed = False
+        sink = delta_function or (
+            lambda text: print(text, end="", flush=True)
         )
-        output_function(final)
+        def write_delta(text: str) -> None:
+            nonlocal streamed
+            streamed = True
+            sink(text)
+        final, session_id, _ = await runtime.ask(
+            prompt, session_id=session_id, output_format="text",
+            text_callback=write_delta,
+        )
+        if not streamed:
+            output_function(final)
+        if not final:
+            output_function("")
+        output_function("")
 
 
 async def compact_session(runtime: Runtime, session_id: str) -> str:
@@ -137,6 +167,9 @@ async def run_cli(argv: list[str] | None = None, *,
         errors(str(exc))
         return 2
 
+    if args.command != "config-check":
+        await runtime.start_external_tools(warn=errors)
+
     try:
         if args.command == "ask":
             final, _, _ = await runtime.ask(args.prompt, session_id=args.session,
@@ -179,6 +212,8 @@ async def run_cli(argv: list[str] | None = None, *,
     except ContiAgentError as exc:
         errors(str(exc))
         return 3
+    finally:
+        await runtime.close_external_tools()
     return 2
 
 

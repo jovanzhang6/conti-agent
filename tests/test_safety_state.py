@@ -124,6 +124,74 @@ pattern = '\.allowed$'
                             item.payload["decision"] == "denied" for item in events))
         self.assertIn('"event": "denied"', audit_path.read_text(encoding="utf-8"))
 
+    async def test_agent_hook_denies_after_permission(self) -> None:
+        class DenyHookEngine:
+            async def run(self, event: str, tool_name: str, payload: dict[str, Any]):
+                from conti_agent.hooks import HookOutcome
+                if event == "tool.before" and tool_name == "workspace_write":
+                    return HookOutcome(False, "策略拒绝写入")
+                return HookOutcome(True, "通过")
+        provider = FakeProvider([
+            ProviderResponse(tool_calls=[ToolCall("one", "workspace_write",
+                                                  {"path": "hooked.txt", "content": "x"})]),
+            ProviderResponse(text="完成"),
+        ])
+        registry = ToolRegistry()
+        tool = WriteTool()
+        registry.register(tool)
+        agent = Agent(
+            provider, registry, self.context,
+            permission_checker=PermissionChecker("workspace", workspace=self.workspace),
+            hook_engine=DenyHookEngine(),
+        )
+        async for _ in agent.run([user_message("写入")]):
+            pass
+        self.assertFalse(tool.called)
+        self.assertFalse((self.root / "hooked.txt").exists())
+
+    def test_runtime_adds_system_prompt(self) -> None:
+        from conti_agent.config import load_single
+        from conti_agent.runtime import Runtime
+        config_path = self.root / "runtime.toml"
+        config_path.write_text(r"""
+[[provider]]
+name = "fake"
+protocol = "fake"
+base_url = "local://fake"
+model = "fake"
+[runtime]
+permission_mode = "workspace"
+""", encoding="utf-8")
+        runtime = Runtime(load_single(config_path), self.root,
+                          output_function=lambda text: None)
+        messages = [user_message("你好")]
+        messages.insert(0, {"role": "system", "content": runtime._system_prompt()})
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("当前工作区", messages[0]["content"])
+        self.assertIn("workspace", messages[0]["content"])
+
+    async def test_tool_call_assistant_message_is_persisted(self) -> None:
+        from conti_agent.sessions import SessionStore
+        provider = FakeProvider([
+            ProviderResponse(tool_calls=[ToolCall("one", "workspace_write",
+                                                  {"path": "session.txt", "content": "x"})]),
+            ProviderResponse(text="done"),
+        ])
+        registry = ToolRegistry()
+        tool = WriteTool()
+        registry.register(tool)
+        store = SessionStore(self.root / ".conti")
+        session_id, _ = store.create(self.root)
+        agent = Agent(provider, registry, self.context, session_store=store,
+                      session_id=session_id)
+        async for _ in agent.run([user_message("调用")]):
+            pass
+        _, messages = store.load(session_id)
+        self.assertEqual(messages[0]["role"], "assistant")
+        self.assertEqual(messages[0]["tool_calls"][0].name, "workspace_write")
+        self.assertEqual(messages[1]["role"], "tool")
+        self.assertTrue(tool.called)
+
     def test_session_append_and_resume(self) -> None:
         store = SessionStore(self.root / ".conti")
         session_id, messages = store.create(self.root, "测试会话")

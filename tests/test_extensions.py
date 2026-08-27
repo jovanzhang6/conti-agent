@@ -68,6 +68,12 @@ command = ["python", "-c", "print('{}')"]
     def test_config_parse_merge_and_secret(self) -> None:
         path = self.write_config()
         config = load_single(path)
+        self.assertEqual(config.providers[0].protocol, "fake")
+        path.write_text(path.read_text(encoding="utf-8").replace(
+            'protocol = "fake"', 'protocol = "openai-compat"'
+        ), encoding="utf-8")
+        alias_config = load_single(path)
+        self.assertEqual(alias_config.providers[0].protocol, "openai-compat")
         self.assertEqual(config.providers[0].model, "fake-model")
         self.assertEqual(config.runtime.max_tool_iterations, 7)
         self.assertEqual(config.profiles[0].allowed_tools, ["workspace_read"])

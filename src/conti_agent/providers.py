@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
@@ -101,6 +102,11 @@ def _json_tool_calls(raw: Any) -> list[ToolCall]:
     return calls
 
 
+def _wire_tool_name(name: str) -> str:
+    """把注册表命名空间转换成 OpenAI 允许的工具名。"""
+    return re.sub(r"[^A-Za-z0-9_-]", "__", name)
+
+
 class OpenAICompatibleProvider(Provider):
     protocol = "openai"
 
@@ -112,13 +118,14 @@ class OpenAICompatibleProvider(Provider):
         self.api_key = api_key
         self.max_output_tokens = max_output_tokens
         self.transport = transport or urllib_transport
+        self._tool_names_by_wire: dict[str, str] = {}
 
     def _convert_tools(self, registry: ToolRegistry) -> list[dict[str, Any]]:
         return [
             {
                 "type": "function",
                 "function": {
-                    "name": tool.name,
+                    "name": _wire_tool_name(tool.name),
                     "description": tool.description,
                     "parameters": tool.parameters,
                 },
@@ -137,7 +144,7 @@ class OpenAICompatibleProvider(Provider):
                         "id": call.id,
                         "type": "function",
                         "function": {
-                            "name": call.name,
+                            "name": _wire_tool_name(call.name),
                             "arguments": json.dumps(call.arguments, ensure_ascii=False),
                         },
                     }
@@ -156,9 +163,21 @@ class OpenAICompatibleProvider(Provider):
         tools = self._convert_tools(registry)
         if tools:
             payload["tools"] = tools
+        self._tool_names_by_wire = {
+            _wire_tool_name(tool.name): tool.name for tool in registry.all()
+        }
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        if stream_handler is not None and self.transport is urllib_transport:
+            payload["stream"] = True
+            return await asyncio.to_thread(
+                self._stream_request,
+                f"{self.base_url}/chat/completions",
+                headers,
+                payload,
+                stream_handler,
+            )
         raw = await asyncio.to_thread(
             self.transport, f"{self.base_url}/chat/completions", "POST", headers, payload
         )
@@ -175,9 +194,99 @@ class OpenAICompatibleProvider(Provider):
         )
         return ProviderResponse(
             text=text,
-            tool_calls=_json_tool_calls(message.get("tool_calls")),
+            tool_calls=[
+                ToolCall(
+                    item.id,
+                    self._tool_names_by_wire.get(item.name, item.name),
+                    item.arguments,
+                )
+                for item in _json_tool_calls(message.get("tool_calls"))
+            ],
             usage=usage,
             stop_reason=choice.get("finish_reason") or "end_turn",
+        )
+
+    def _stream_request(self, url: str, headers: dict[str, str],
+                         payload: dict[str, Any],
+                         stream_handler: StreamHandler) -> ProviderResponse:
+        """同步读取 SSE；由 asyncio.to_thread 调用，不阻塞事件循环。"""
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        text_parts: list[str] = []
+        tool_parts: dict[int, dict[str, str]] = {}
+        stop_reason = "end_turn"
+        usage = Usage()
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response:
+                while True:
+                    raw_line = response.readline()
+                    if not raw_line:
+                        break
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data_value = line[5:].strip()
+                    if data_value == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_value)
+                    except json.JSONDecodeError as exc:
+                        raise ProviderError(f"无效的流式响应片段：{exc}", transient=True) from exc
+                    choices = chunk.get("choices") or []
+                    if choices:
+                        choice = choices[0]
+                        delta = choice.get("delta") or {}
+                        delta_text = delta.get("content")
+                        if delta_text:
+                            text_parts.append(str(delta_text))
+                            stream_handler("text.delta", {"text": str(delta_text)})
+                        for raw_call in delta.get("tool_calls") or []:
+                            index = int(raw_call.get("index", 0))
+                            item = tool_parts.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                            if raw_call.get("id"):
+                                item["id"] = raw_call["id"]
+                            function = raw_call.get("function") or {}
+                            if function.get("name"):
+                                item["name"] = function["name"]
+                            if function.get("arguments"):
+                                item["arguments"] += function["arguments"]
+                        if choice.get("finish_reason"):
+                            stop_reason = choice["finish_reason"]
+                    usage_raw = chunk.get("usage")
+                    if usage_raw:
+                        usage = Usage(
+                            input_tokens=int(usage_raw.get("prompt_tokens", 0)),
+                            output_tokens=int(usage_raw.get("completion_tokens", 0)),
+                        )
+        except urllib.error.HTTPError as exc:
+            transient = exc.code in {408, 409, 425, 429} or exc.code >= 500
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise ProviderError(f"HTTP {exc.code}: {detail}", transient=transient,
+                                status_code=exc.code) from exc
+        except (TimeoutError, urllib.error.URLError) as exc:
+            raise ProviderError(f"provider connection failed: {exc}", transient=True) from exc
+
+        calls: list[ToolCall] = []
+        for index in sorted(tool_parts):
+            item = tool_parts[index]
+            try:
+                arguments = json.loads(item["arguments"] or "{}")
+            except json.JSONDecodeError as exc:
+                raise ProviderError(f"无效的工具参数流：{exc}") from exc
+            wire_name = item["name"]
+            calls.append(ToolCall(
+                item["id"] or f"call_{index}",
+                self._tool_names_by_wire.get(wire_name, wire_name),
+                arguments,
+            ))
+        text = "".join(text_parts)
+        if not text and not calls:
+            raise ProviderError("provider stream ended without content", transient=True)
+        return ProviderResponse(
+            text=text or None,
+            tool_calls=calls,
+            usage=usage,
+            stop_reason=stop_reason,
         )
 
 
