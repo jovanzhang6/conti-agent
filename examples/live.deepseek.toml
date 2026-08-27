@@ -1,0 +1,21 @@
+# 复制到测试工作区后不要写入 API Key。
+# 先设置环境变量 CONTI_AGENT_E2E_API_KEY。
+[[provider]]
+name = "deepseek"
+protocol = "openai-compat"
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"
+api_key_env = "CONTI_AGENT_E2E_API_KEY"
+context_window = 128000
+max_output_tokens = 2048
+
+[runtime]
+permission_mode = "workspace"
+max_tool_iterations = 16
+
+[extensions]
+skills = true
+hooks = true
+profiles = true
+external_tools = true
+collaboration = true

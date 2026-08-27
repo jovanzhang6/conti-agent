@@ -4,6 +4,8 @@
 
 `conti-agent` 是一个独立、可嵌入、可学习的 Python coding-agent 运行时。它把兼容 OpenAI 或 Anthropic Messages 协议的模型接入本地工作区，并用统一权限层控制所有副作用。
 
+第一公民体验是 `chat` 终端对话界面：用户进入终端后连续输入任务，助手输出流式回答。这是由 Runtime 事件驱动的独立行式界面，不使用第三方 TUI 框架，也不是全屏富界面。
+
 设计原则：
 
 1. **确定性核心**：模型、工具、事件、持久化都可用假实现测试。
@@ -28,13 +30,15 @@ conti-agent --config .conti/config.toml ask "检查项目" --event-format jsonl
 - 成功返回 `0`，配置或输入错误返回 `2`，运行失败返回 `3`；
 - CLI、REPL 和 HTTP 共用 Runtime 门面。
 
-### 2.2 行式交互会话
+### 2.2 终端对话界面
 
 ```bash
 conti-agent chat
 ```
 
-支持 `/help`、`/sessions`、`/resume <id>`、`/compact`、`/exit` 和行尾反斜杠续行。REPL 只负责输入输出，不拥有运行时策略。
+启动后必须显示当前 provider、model、权限模式、工作区和可用命令。助手输出必须真实流式；Provider 不支持流式时回显完整结果。
+
+支持 `/help`、`/new`、`/status`、`/sessions`、`/resume <id>`、`/compact`、`/exit` 和行尾反斜杠续行。界面只负责输入输出，不拥有运行时策略。
 
 ### 2.3 本地服务
 
@@ -85,7 +89,7 @@ collaboration = true
 
 约束：
 
-- 支持 `openai`、`anthropic`、`fake`；
+- 支持 `openai`、`openai-compat`、`anthropic`、`fake`；
 - API Key 只能来自 `api_key_env`，不允许明文；
 - Provider 名称必须唯一；
 - 权限模式只允许 `read_only`、`workspace`、`approved`、`trusted`。
@@ -209,17 +213,17 @@ Profile 定义专家子代理的系统提示、工具白名单、权限模式和
 3. `tools/call`
 4. 关闭或超时清理
 
-工具名会加命名空间，例如 `docs.search`。外部工具仍必须通过 schema 校验和权限层。
+工具名会加命名空间，例如 `docs.echo`。发送到 OpenAI-compatible 服务前，`docs.echo` 映射为合法的 `docs__echo`；返回请求后映射回注册表名。外部工具仍必须通过 schema 校验和权限层。Runtime 启动配置中的服务器，并在 CLI 退出时关闭子进程。
 
 ## 11. Hook
 
-Hook 收到 JSON stdin，可返回：
+Hook 在权限通过后、工具执行前运行 `tool.before`；工具执行后运行 `tool.after`。Hook 收到 JSON stdin，可返回：
 
 ```json
 {"decision": "deny", "message": "阻止危险命令"}
 ```
 
-Hook 超时、非零退出码和无效 JSON 默认导致拒绝。Hook 只能拒绝或替换输出，不能放行未批准操作。
+Hook 超时、非零退出码和无效 JSON 默认导致拒绝。Hook 只能拒绝或替换输出，不能放行未批准操作。权限拒绝的操作不会再进入前置 Hook。
 
 ## 12. 协作任务板
 
@@ -242,3 +246,16 @@ Hook 超时、非零退出码和无效 JSON 默认导致拒绝。Hook 只能拒�
 - 不内置 Logo 或品牌视觉；
 - 不主动安装或执行远程代码；
 - 不要求第三方运行时依赖。
+
+## 15. v0.1.0 发布门槛
+
+除自动化测试外，发布前必须完成以下真实端到端验证：
+
+1. 真实 OpenAI-compatible 模型一次性调用成功；
+2. 真实模型进入 `chat` 后连续多轮对话成功；
+3. 真实模型调用 `workspace_read` 或 `workspace_write` 成功；
+4. 前置 Hook 能拒绝写入并让目标文件保持不存在；
+5. 外部 `namespace.tool` 能从 JSON-RPC 子进程加载并被模型调用；
+6. 密钥只出现在环境变量，不出现在源码、配置示例、会话或审计文件；
+7. `python -m unittest discover -s tests` 全部通过；
+8. 退出 CLI 后没有子进程或管道资源泄漏警告。

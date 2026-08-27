@@ -48,14 +48,38 @@ python -m conti_agent.cli --help
 
 ## 快速开始
 
-### 1. 离线示例
+### 1. 推荐入口：进入终端与真实 AI 对话
+
+先复制真实模型示例：
 
 ```bash
 mkdir -p .conti
-cp docs/CONFIG_EXAMPLE.toml .conti/config.toml
+cp examples/live.deepseek.toml .conti/config.toml
 ```
 
-把第一个 provider 换成：
+配置使用环境变量：
+
+```toml
+api_key_env = "CONTI_AGENT_E2E_API_KEY"
+```
+
+设置环境变量：
+
+```bash
+export CONTI_AGENT_E2E_API_KEY="你的真实 API Key"
+```
+
+进入终端对话：
+
+```bash
+python -m conti_agent.cli --config .conti/config.toml chat
+```
+
+界面会显示模型、权限和工作区。直接输入任务即可连续对话。
+
+### 2. 离线冒烟
+
+把 provider 换成：
 
 ```toml
 [[provider]]
@@ -74,7 +98,7 @@ permission_mode = "workspace"
 python -m conti_agent.cli ask "你好"
 ```
 
-### 2. 真实模型
+### 3. 其他真实模型
 
 OpenAI-compatible：
 
@@ -101,16 +125,16 @@ api_key_env = "EXAMPLE_API_KEY"
 设置环境变量后运行：
 
 ```bash
-python -m conti_agent.cli ask "检查当前项目，并解释测试结构"
+python -m conti_agent.cli --config .conti/config.toml ask "检查当前项目，并解释测试结构"
 ```
 
-### 3. 观察事件
+### 4. 观察事件
 
 ```bash
 python -m conti_agent.cli ask "检查项目" --event-format jsonl
 ```
 
-### 4. 交互会话
+### 5. 会话命令
 
 ```bash
 python -m conti_agent.cli chat
@@ -120,11 +144,15 @@ python -m conti_agent.cli chat
 
 ```text
 /help
+/new
+/status
 /sessions
 /resume <session-id>
 /compact
 /exit
 ```
+
+端到端手动验收见 [`docs/E2E_TESTING.md`](docs/E2E_TESTING.md)。
 
 ## 配置
 
