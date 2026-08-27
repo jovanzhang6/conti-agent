@@ -177,6 +177,7 @@ python -m unittest discover -s tests
 - [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md)：分阶段实现；
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：架构；
 - [`docs/LEARNING.md`](docs/LEARNING.md)：学习路线；
+- [`docs/E2E_TESTING.md`](docs/E2E_TESTING.md)：端到端手动测试；
 - [`docs/RELEASE.md`](docs/RELEASE.md)：发布清单。
 
 ## 当前版本
