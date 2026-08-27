@@ -1,75 +1,68 @@
-# conti-agent Functional Specification
+# conti-agent 功能规格
 
-## 1. Product Goal
+## 1. 项目目标
 
-`conti-agent` is an independent, embeddable Python runtime for coding agents. It
-connects a language model to a local workspace through a controlled tool system.
-The project favors four properties:
+`conti-agent` 是一个独立、可嵌入、可学习的 Python coding-agent 运行时。它把兼容 OpenAI 或 Anthropic Messages 协议的模型接入本地工作区，并用统一权限层控制所有副作用。
 
-1. **Deterministic core** — model calls, tools, and persistence are ordinary
-   Python objects that can be tested without network access.
-2. **Explicit safety** — every effectful action is checked by one permission
-   pipeline and recorded in an audit trail.
-3. **Observable execution** — a single event stream describes text, thinking,
-   tool calls, results, retries, usage, and completion.
-4. **Incremental capability** — skills, custom agent profiles, external tool
-   servers, and collaborative workers attach without changing the core.
+设计原则：
 
-The first release intentionally ships a terminal REPL rather than a graphical
-terminal UI. There is no logo or visual identity beyond plain text.
+1. **确定性核心**：模型、工具、事件、持久化都可用假实现测试。
+2. **显式安全**：所有写入、执行和控制操作先经过权限检查，并写入审计账本。
+3. **可观测**：文本流、工具请求、工具结果、重试、用量和完成状态使用同一事件模型。
+4. **可扩展**：Skill、Profile、Hook 和外部工具进程不侵入核心。
+5. **本地优先**：无遥测、无强制第三方依赖、无隐藏云端控制面。
 
-## 2. Operating Modes
+## 2. 运行模式
 
-### 2.1 One-shot mode
+### 2.1 一次性任务
 
-`conti-agent ask "<prompt>"` starts a task from the current directory, runs the
-agent loop until the model finishes or reaches a safety limit, prints the final
-answer, and exits with:
+```bash
+conti-agent --config .conti/config.toml ask "修复测试"
+conti-agent --config .conti/config.toml ask "检查项目" --event-format jsonl
+```
 
-- `0` on successful completion;
-- `2` when input or configuration is invalid;
-- `3` when the model/tool loop fails;
-- `130` on user interruption.
+要求：
 
-`--event-format jsonl` emits one JSON object per execution event. The stream
-must remain machine-readable and must include event, timestamp, payload, and, where applicable, tool IDs.
+- `ask` 执行完整 Agent 循环；
+- `--event-format jsonl` 输出机器可读事件；
+- 成功返回 `0`，配置或输入错误返回 `2`，运行失败返回 `3`；
+- CLI、REPL 和 HTTP 共用 Runtime 门面。
 
-### 2.2 Interactive mode
+### 2.2 行式交互会话
 
-`conti-agent chat` uses a minimal line-oriented REPL:
+```bash
+conti-agent chat
+```
 
-- a prompt is submitted with Enter;
-- multi-line input is opened by ending a line with `\`;
-- `/help` lists commands;
-- `/sessions` lists saved sessions;
-- `/resume <id>` resumes a session;
-- `/compact [instruction]` summarizes older history;
-- `/exit` quits.
+支持 `/help`、`/sessions`、`/resume <id>`、`/compact`、`/exit` 和行尾反斜杠续行。REPL 只负责输入输出，不拥有运行时策略。
 
-The REPL must not own runtime policy. It is an adapter over the same event API
-as one-shot mode.
+### 2.3 本地服务
 
-### 2.3 Service mode
+```bash
+conti-agent serve --host 127.0.0.1 --port 8791
+```
 
-`conti-agent serve --host 127.0.0.1 --port 8791` exposes a local HTTP endpoint
-for task submission and event retrieval. Default binding is loopback. Service
-mode must require explicit consent before binding outside loopback.
+默认只绑定 loopback。请求体：
 
-## 3. Configuration
+```json
+{"prompt": "检查项目", "session_id": null, "output_format": "jsonl"}
+```
 
-Configuration is layered from low to high precedence:
+返回最终结果、会话 ID 和事件列表。
 
-1. built-in defaults;
-2. `$CONTI_AGENT_HOME/config.toml` or `~/.conti-agent/config.toml`;
-3. `.conti/config.toml` in the workspace;
-4. `.conti/config.local.toml` for user-specific overrides;
-5. command-line arguments.
+## 3. 配置
 
-Required configuration concepts:
+配置使用 TOML，默认按以下优先级合并：
+
+1. `.conti/config.local.toml`
+2. `.conti/config.toml`
+3. `~/.conti-agent/config.toml`
+
+核心配置：
 
 ```toml
 [[provider]]
-name = "local-openai"
+name = "primary"
 protocol = "openai"
 base_url = "https://api.example.com/v1"
 model = "example-model"
@@ -90,319 +83,162 @@ external_tools = true
 collaboration = true
 ```
 
-Additional provider protocols:
+约束：
 
-- `anthropic`: Anthropic Messages wire format;
-- `openai`: OpenAI-compatible Chat Completions wire format.
+- 支持 `openai`、`anthropic`、`fake`；
+- API Key 只能来自 `api_key_env`，不允许明文；
+- Provider 名称必须唯一；
+- 权限模式只允许 `read_only`、`workspace`、`approved`、`trusted`。
 
-An API key is resolved only from `api_key_env`; direct secrets in config are not
-accepted. A missing key produces a provider-configuration error before tool
-execution. The context window resolution order is explicit config, protocol
-metadata if available, a conservative model-name table, then 128000.
+## 4. Agent 循环
 
-## 4. Conversation Model
+一次任务流程：
 
-The canonical message roles are:
+1. 构建 messages 和工具 schema；
+2. 调用 Provider；
+3. 发出文本增量、用量和 assistant 消息事件；
+4. 对每个工具调用执行参数校验、权限检查、工具执行和审计；
+5. 把工具结果写回 messages；
+6. 循环直到没有工具调用或达到上限；
+7. 输出 `run.completed` 或 `run.failed`。
 
-- `system`: durable operating instructions;
-- `user`: human or external input;
-- `assistant`: model text and tool requests;
-- `tool`: a deterministic tool result tied to a request ID.
-
-A conversation is an append-only list. User-visible messages and internal tool
-events are kept together so a replay produces the same state.
-
-## 5. Agent Execution Loop
-
-For one user task the agent:
-
-1. builds the system prompt from runtime instructions, enabled skill summaries,
-   and workspace policy;
-2. selects tools visible to the current profile;
-3. sends messages to the provider;
-4. streams text, thinking, usage, and tool requests as events;
-5. executes each approved tool request through the permission pipeline;
-6. returns normalized tool results to the provider;
-7. repeats until no tool request remains or the iteration limit is reached;
-8. emits completion and persists the final ledger.
-
-Execution events:
-
-| Event | Requirement |
-|---|---|
-| `run.started` / `run.completed` | identify a run and completion state |
-| `message.created` | expose a complete assistant message |
-| `text.delta`, `thinking.delta` | preserve streamed model output |
-| `tool.requested` | expose tool name, arguments, and request ID |
-| `tool.approved`, `tool.denied` | expose permission outcome |
-| `tool.completed` | expose output, error flag, and duration |
-| `usage.recorded` | expose input/output tokens when available |
-| `run.failed` | expose a recoverable error and optional retry hint |
-
-The loop must be deterministic when supplied a fake provider. Model provider
-errors use bounded exponential backoff and are retried only for transient
-classes (connection, timeout, rate limit, HTTP 5xx).
-
-## 6. Tool System
-
-Every tool implements a common contract:
-
-- stable `name`;
-- natural-language `description`;
-- JSON-schema-like `parameters`;
-- `validate(args)` before safety checks;
-- async `execute(args, context)`;
-- result normalization to text plus structured metadata;
-- declared effects: `read`, `write`, `execute`, `network`, or `control`.
-
-The first release includes:
-
-| Tool | Purpose |
-|---|---|
-| `workspace_read` | read a UTF-8 file with bounded size |
-| `workspace_write` | create or replace a file with parent creation |
-| `workspace_edit` | replace an exact old segment and refuse ambiguous matches |
-| `workspace_list` | enumerate paths with ignores and depth |
-| `workspace_search` | literal or regular-expression text search |
-| `process_run` | execute a command with timeout, capture, and environment allowlist |
-| `task_note` | maintain a durable task note for plan reminders |
-| `request_input` | ask an interactive user a clarifying question |
-
-`process_run` defaults to the workspace directory and enforces:
-
-- hard timeout and killed-process cleanup;
-- combined stdout/stderr capture with bounded size;
-- shell only when explicitly requested;
-- environment allow/deny rules;
-- permission checks before execution.
-
-Tool results must be non-blocking at the architecture level; a slow tool may be
-executed by a managed future, but event order remains deterministic.
-
-## 7. Permission and Sandbox Pipeline
-
-Permission modes are:
-
-1. `read_only`: read tools allowed; effects denied by default;
-2. `workspace`: reads allowed; writes and commands allowed only inside the
-   approved workspace;
-3. `approved`: first use of a capability requires approval, then the exact rule
-   may be remembered for one session;
-4. `trusted`: explicitly user-selected broad mode; dangerous command detection
-   still applies.
-
-Order of checks:
-
-1. tool schema validation;
-2. declared effect and mode policy;
-3. path normalization and workspace boundary check;
-4. command policy and dangerous-pattern detection;
-5. project/local rules;
-6. interactive or configured approval;
-7. audit record.
-
-Path checks must resolve symlinks where available and reject absolute paths,
-parent traversal, or symlink escapes outside approved roots. Windows paths use
-case-insensitive comparison after lexical normalization.
-
-Command policy must block, or require a dangerous override for, operations such
-as recursive deletion, disk formatting, privileged installation, credential
-exfiltration patterns, and remote destructive execution. Rules support `allow`
-and `deny`, exact or regex command matching, comments, and source precedence:
-local project > project > user > defaults.
-
-All denied or approved effects are written to `.conti/runtime/audit.jsonl`
-without secret values.
-
-## 8. Persistence and Sessions
-
-The state root is `.conti`. It contains:
+事件：
 
 ```text
-.conti/
-  config.toml
-  config.local.toml
-  sessions/<session-id>.jsonl
-  runtime/audit.jsonl
-  runtime/tasks/
-  skills/
-  profiles/
-  memory/
+run.started
+run.completed
+run.failed
+run.retry
+message.created
+text.delta
+tool.requested
+tool.approved
+tool.completed
+usage.recorded
 ```
 
-A session ledger records:
+连接、超时、限流和 5xx 属于可重试错误；重试次数和指数退避由 `AgentRunConfig` 控制。
 
-- schema version;
-- session ID, creation/update time, title, and workspace;
-- every user, assistant, and tool message;
-- tool approvals and denials;
-- compaction records.
+## 5. 内建工具
 
-`resume` must rebuild an in-memory conversation from a ledger and reject
-corrupt or unknown schema versions rather than silently dropping data.
+| 工具 | 效果 | 功能 |
+|---|---|---|
+| `workspace_read` | read | 读取有大小限制的 UTF-8 文件 |
+| `workspace_write` | write | 创建或替换文件 |
+| `workspace_edit` | write | 精确替换文本，歧义时拒绝 |
+| `workspace_list` | read | 列出路径并忽略依赖目录 |
+| `workspace_search` | read | 字面量或正则搜索 |
+| `process_run` | execute/write | 有超时、输出上限和环境策略的命令 |
+| `load_skill` | read | 显式加载 Skill 正文 |
+| `task_note` | write | 持久化任务笔记 |
+| `request_input` | control | 向本地用户请求澄清 |
+| `spawn_task` | control | 执行受限 Profile 子任务 |
 
-## 9. Context Management
+所有路径必须停留在活动工作区内。`process_run` 必须有超时、输出截断和显式环境继承。
 
-Context management uses estimated tokens and provider-declared windows. It must:
+## 6. 权限与审计
 
-- reserve room for output and tool schemas;
-- retain the system prompt, latest user request, and recent messages;
-- mark older tool results as compactible;
-- compact old turns into an explicit summary message;
-- preserve compacted-span boundaries and usage metadata;
-- expose a `/compact` action and an automatic trigger.
+权限模式：
 
-Compaction is provider-backed when configured and deterministic/fake-backed in
-tests. The original ledger remains immutable.
+1. `read_only`：只允许读取；
+2. `workspace`：允许工作区内副作用；
+3. `approved`：非读取操作首次需要批准；
+4. `trusted`：宽松，但危险命令仍需批准。
 
-## 10. Instruction and Skill Packs
+检查顺序：
 
-Instructions are loaded from:
+1. JSON 参数校验；
+2. 用户规则；
+3. 模式策略；
+4. 危险命令检测；
+5. 路径沙箱；
+6. 批准；
+7. 审计。
 
-1. built-in runtime guidance;
-2. `.conti/memory/instructions.md`;
-3. enabled skill files under `.conti/skills`;
-4. profile-specific instructions.
+规则示例：
 
-A skill is a Markdown file with front matter:
+```toml
+[[rule]]
+tool = "workspace_write"
+decision = "deny"
+pattern = '\.env$'
+```
+
+审计写入 `.conti/runtime/audit.jsonl`，`content` 和 `env` 被移除。
+
+## 7. 会话与上下文
+
+`.conti/sessions/<session-id>.jsonl` 是追加式账本。恢复时逐行校验 schema version 和记录类型；损坏账本必须报错。
+
+上下文预算：
+
+```text
+context_window - max_output_tokens - tool_schema_tokens
+```
+
+压缩保留 system 提示、最近消息和显式历史摘要；原始账本仍保留压缩前记录。
+
+## 8. Skill
+
+Skill 是 `.conti/skills/*.md`，front matter 使用 TOML：
 
 ```markdown
 ---
-name = "release-checklist"
-description = "Check project readiness before a release."
-keywords = ["release", "version"]
+name = "release"
+description = "发布前检查清单"
+keywords = ["release"]
 version = 1
 ---
 
-1. Run tests.
-2. Update the changelog.
+1. 运行测试。
+2. 检查变更记录。
 ```
 
-The runtime advertises only names and descriptions to the model. A
-`load_skill` action loads one full skill body after validation. Skills cannot
-execute code by themselves and cannot widen permissions.
+模型默认只看见元数据；必须通过 `load_skill` 显式加载正文。Skill 不能执行代码，也不能扩大权限。
 
-## 11. Agent Profiles and Subtasks
+## 9. Profile 与子任务
 
-Profiles define reusable specialist behavior:
+Profile 定义专家子代理的系统提示、工具白名单、权限模式和最大迭代数。`spawn_task` 创建独立子消息列表和子上下文，只返回最终文本报告。子任务不能修改父消息列表，也不能绕过权限检查。
 
-```toml
-[[profile]]
-name = "explorer"
-description = "Read-only repository investigation."
-system_prompt = "Investigate carefully and cite paths."
-allowed_tools = ["workspace_read", "workspace_list", "workspace_search"]
-permission_mode = "read_only"
-max_tool_iterations = 12
+## 10. 外部工具协议
+
+外部工具进程使用行分隔 JSON-RPC：
+
+1. `initialize`
+2. `tools/list`
+3. `tools/call`
+4. 关闭或超时清理
+
+工具名会加命名空间，例如 `docs.search`。外部工具仍必须通过 schema 校验和权限层。
+
+## 11. Hook
+
+Hook 收到 JSON stdin，可返回：
+
+```json
+{"decision": "deny", "message": "阻止危险命令"}
 ```
 
-The parent agent can delegate a bounded subtask through a `spawn_task` tool.
-A subtask:
+Hook 超时、非零退出码和无效 JSON 默认导致拒绝。Hook 只能拒绝或替换输出，不能放行未批准操作。
 
-- has a unique task ID;
-- receives its own conversation and profile;
-- cannot modify parent history directly;
-- returns exactly one final report;
-- emits nested-task events with a parent task ID;
-- cannot recursively spawn unless explicitly permitted.
+## 12. 协作任务板
 
-## 12. Collaboration
+`CrewManager` 提供本地任务板和邮箱。任务有唯一 ID、负责人、状态、结果和时间。状态为 `todo`、`doing`、`done`、`failed`。数据原子写入 `.conti/runtime/crews/<crew>.json`。每个 worker 仍通过 Runtime 使用自己的权限检查。
 
-Crew mode is a local coordination layer over bounded subtasks:
+## 13. Git 快照
 
-- a shared task board persists status, owner, summary, and result;
-- workers can be in-process tasks or external `conti-agent worker` processes;
-- a mailbox routes messages between lead and workers;
-- a worker stops on stop-token, stop command, or parent shutdown;
-- task IDs and worker names are unique within a crew.
+`SnapshotManager` 提供显式 Git worktree：
 
-Collaboration must never bypass permissions. Each worker enforces its own
-profile and sandbox.
+- `create(slug)` 创建 `conti/<slug>` 分支和工作树；
+- `status(path)` 返回变更；
+- `cleanup(path)` 只能显式触发；
+- 非 Git 仓库必须安全失败。
 
-## 13. Workspace Snapshots
+## 14. 非目标
 
-For Git repositories, snapshot sessions provide isolated workspaces:
-
-- create a branch and Git worktree from a clean base;
-- mirror selected cache directories by symlink or junction;
-- run tools with the active snapshot as workspace root;
-- report created, modified, and deleted files;
-- merge only with an explicit user-approved action;
-- retain or remove snapshots only through explicit cleanup policy.
-
-Snapshot functionality must degrade safely outside a Git repository.
-
-## 14. External Tool Protocol
-
-The project uses a JSON-RPC stdio protocol for external tool servers:
-
-1. initialize with runtime and capability metadata;
-2. request `tools/list`;
-3. call a tool through `tools/call`;
-4. normalize JSON Schema to the native tool contract;
-5. shut down cleanly and kill a process on timeout.
-
-Each server has its own namespace (for example `docs.search`) to avoid collisions.
-Loading strategy can start in metadata-only mode and expose an
-`external_tool_load` action when schema size is large.
-
-## 15. Hooks
-
-Hooks are short declarative entries:
-
-```toml
-[[hook]]
-event = "tool.before"
-match_tool = "process_run"
-command = ["python", ".conti/hooks/check.py"]
-timeout_ms = 5000
-continue_on_error = false
-```
-
-Supported events are `run.before`, `run.after`, `tool.before`, and `tool.after`.
-Hook input is JSON on stdin. A hook may succeed, fail, or return JSON with:
-
-- `decision`: `allow` or `deny`;
-- `message`: human-readable reason;
-- `replace_output`: optional normalized tool result.
-
-Hook errors are never silently converted into permission grants.
-
-## 16. Memory
-
-Memory is local, inspectable plain text:
-
-- `instructions.md`: durable user/workspace preferences;
-- `facts.md`: concise remembered facts;
-- `sessions/<id>.summary.md`: session summaries.
-
-The runtime may propose a memory update, but durable writes require write
-permission and are recorded in the audit trail. Retrieval is keyword-first;
-there is no hidden network memory service.
-
-## 17. Reliability
-
-- No stack trace is required for normal permission denials.
-- Tool errors become model-visible results and are also logged.
-- A crash report may be written to `.conti/runtime/crash/last.json`.
-- Logging avoids prompt bodies and API keys by default.
-- Interrupt handling attempts tool termination and session flush.
-
-## 18. Testing Requirements
-
-- Unit-test configuration parsing and precedence.
-- Unit-test all permission mode transitions and path escapes.
-- Use fake providers to cover text, tool, retry, and limit behavior.
-- Use temporary workspaces for tools and sessions.
-- Test hooks, skills, profiles, external-tool protocol, and collaboration with
-  deterministic local processes/fakes.
-- Ensure every public CLI mode has a test.
-- Run the full standard-library test suite with `python -m unittest discover`.
-
-## 19. Non-Goals
-
-- No closed-source cloud control plane.
-- No telemetry.
-- No proprietary visual identity.
-- No automatic execution of unreviewed remote code.
-- No silent permission escalation.
+- 不做遥测；
+- 不做自动权限提升；
+- 不做图形化终端界面；
+- 不内置 Logo 或品牌视觉；
+- 不主动安装或执行远程代码；
+- 不要求第三方运行时依赖。

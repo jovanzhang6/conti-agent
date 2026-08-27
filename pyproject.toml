@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "conti-agent"
 version = "0.1.0"
-description = "A small, auditable Python coding-agent runtime"
+description = "一个小型、可审计的 Python coding-agent 运行时"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

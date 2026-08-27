@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 class ContiAgentError(Exception):
-    """Base class for expected runtime failures."""
+    """运行时可预期错误的基类。"""
 
 
 class ConfigurationError(ContiAgentError):
@@ -10,7 +10,7 @@ class ConfigurationError(ContiAgentError):
 
 
 class ProviderError(ContiAgentError):
-    """A model-provider request failed."""
+    """模型服务请求失败。"""
 
     def __init__(self, message: str, *, transient: bool = False,
                  status_code: int | None = None) -> None:

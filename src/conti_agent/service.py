@@ -34,12 +34,8 @@ class RuntimeService:
         prompt, session_id, output_format = self.validate_submission(payload)
         lines: list[str] = []
         original = self.runtime.output_function
-        if output_format == "jsonl":
-            async def sink(text: str) -> None:
-                lines.append(text)
-        else:
-            def sink(text: str) -> None:
-                lines.append(text)
+        def sink(text: str) -> None:
+            lines.append(text)
             original = self.runtime.output_function
             self.runtime.output_function = sink
         try:

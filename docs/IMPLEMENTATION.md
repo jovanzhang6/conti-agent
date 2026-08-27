@@ -1,199 +1,185 @@
-# conti-agent Implementation Plan
+# conti-agent 分阶段实现记录
 
-The runtime is implemented bottom-up. Each phase has a reviewable commit, tests,
-and a concrete exit criterion. Later phases may add adapters but must not make
-the deterministic core depend on them.
+本文档记录实施路线、验收口径和当前完成状态。每个阶段都有独立提交和测试。
 
-## Phase 0 — Repository and Design Baseline
+## 阶段 0：独立仓库与设计基线
 
-**Deliverables**
+已完成：
 
-- Python package layout under `src/conti_agent`;
-- functional specification;
-- staged implementation plan;
-- standard-library-only test entry point;
-- MIT project metadata.
+- 建立 `src/conti_agent` 包结构；
+- 持久化功能规格；
+- 持久化分阶段实施计划；
+- 使用标准库 `unittest`；
+- 采用 MIT 许可；
+- 不引入 TUI、Logo 或继承视觉风格。
 
-**Exit criteria**
+验证：
 
 ```bash
 python -m unittest discover -s tests
 ```
 
-succeeds, and design documents are committed before runtime code.
+## 阶段 1：确定性核心
 
-## Phase 1 — Deterministic Agent Core
+文件：
 
-**Modules**
+- `messages.py`
+- `events.py`
+- `schema.py`
+- `tools.py`
+- `providers.py`
+- `agent.py`
 
-`messages.py`, `events.py`, `tools.py`, `providers.py`, `agent.py`
+实现：
 
-**Implementation notes**
+- 消息、工具调用和用量模型；
+- JSON 参数校验；
+- 工具注册表和 `ToolResult`；
+- OpenAI-compatible、Anthropic-compatible、Fake Provider；
+- 注入式 HTTP transport；
+- 事件流 Agent 循环；
+- 重试和最大迭代限制。
 
-- Model messages are immutable dictionaries normalized at the boundary.
-- Events are dataclasses serialized through `asdict`.
-- Tools expose parameters and effects; the registry rejects duplicate names.
-- Providers implement async `complete(messages, tools, stream_handler)`.
-- An OpenAI-compatible provider builds Chat Completions requests; an Anthropic
-  provider builds Messages requests. HTTP transport is injected and optional.
-- `FakeProvider` enables deterministic tests without sockets.
-- The agent loop streams deltas, requests tools, executes them, appends results,
-  and terminates on a final assistant message.
+验收：
 
-**Tests**
+- Fake Provider 可直接回答；
+- 可完成一次工具调用；
+- 超过迭代上限会失败；
+- 瞬时错误会重试；
+- 两种 wire format 有映射测试。
 
-- tool schema conversion and duplicate rejection;
-- final-answer-only run;
-- one tool-call round;
-- maximum-iteration failure;
-- provider retry for transient errors;
-- JSONL event serialization.
+## 阶段 2：本地工作区工具
 
-**Exit criteria**
+文件：
 
-A fake-provider run can answer directly and can complete one read-only tool
-round with event-level assertions.
+- `workspace.py`
+- `tools_local.py`
 
-## Phase 2 — Local Workspace Tools
+实现：
 
-**Modules**
+- 路径归一化和边界检查；
+- 读、写、精确编辑、列表、搜索；
+- CRLF/LF 保留；
+- 依赖目录和隐藏文件忽略；
+- 进程超时、输出截断和环境策略。
 
-`workspace.py`, `tools_local.py`
+验收：
 
-**Implementation notes**
+- 路径越界失败；
+- 歧义编辑不写入；
+- 超时终止进程；
+- 环境变量只有显式继承才可见；
+- CRLF 文件编辑后保留 CRLF。
 
-- All paths resolve against the active workspace and are rejected on escape.
-- Reads enforce an explicit maximum file size.
-- Writes create parent directories and record bytes written.
-- Edits require an exact old segment and reject zero or ambiguous matches.
-- Listing ignores common dependency/cache directories by default.
-- Search returns bounded path/line/text tuples and supports literal mode.
-- Process execution uses platform-neutral async subprocesses with timeout,
-  output cap, environment policy, and explicit shell opt-in.
+## 阶段 3：安全、会话与上下文
 
-**Tests**
+文件：
 
-- normal read/write/edit/list/search;
-- newline and CRLF preservation;
-- traversal and symlink escape rejection;
-- ambiguous edit rejection;
-- process timeout and output truncation;
-- workspace-root confinement.
+- `permissions.py`
+- `sessions.py`
+- `context.py`
 
-**Exit criteria**
+实现：
 
-Every built-in tool can execute in a temporary workspace and fails closed on
-invalid paths.
+- 四种权限模式；
+- 规则引擎和优先级；
+- 危险命令检测；
+- 路径沙箱；
+- 批准回调；
+- JSONL 审计；
+- 追加式会话账本；
+- 上下文预算和历史压缩。
 
-## Phase 3 — Safety, Sessions, and Context
+验收：
 
-**Modules**
+- 拒绝的工具不执行；
+- 审计不记录敏感内容；
+- 本地规则覆盖项目规则；
+- approved 模式同一能力只批准一次；
+- 会话可重建消息列表。
 
-`permissions.py`, `sessions.py`, `context.py`
+## 阶段 4：扩展机制
 
-**Implementation notes**
+文件：
 
-- Permission decisions are separate pure objects.
-- Rules are loaded from defaults and TOML files with local-over-project-over-user
-  precedence.
-- Dangerous command detection is conservative and testable.
-- Tool executor wraps every effectful tool after validation and emits
-  approval/denial events.
-- Sessions append canonical JSONL records and rebuild conversations from them.
-- Context planning keeps recent turns and compacts compactible history behind an
-  explicit summary message.
+- `config.py`
+- `skills.py`
+- `hooks.py`
+- `profiles.py`
+- `external.py`
 
-**Tests**
+实现：
 
-- every permission mode;
-- allow/deny rule precedence;
-- dangerous command rejection;
-- denial audit record;
-- session append/resume/corruption rejection;
-- automatic and manual compaction boundaries.
+- TOML Provider/Runtime/Profile/Hook/External Server；
+- 配置合并和环境变量密钥；
+- Skill 元数据与显式加载；
+- Hook 超时、失败拒绝和输出替换；
+- Profile 子代理；
+- 外部 JSON-RPC 工具命名空间。
 
-**Exit criteria**
+验收：
 
-A denied write or command never reaches the tool and is recorded; a saved session
-can be replayed into an equivalent conversation.
+- 配置可解析、合并、校验；
+- Skill 错误会失败；
+- Hook 失败不会放行；
+- Profile 子任务独立运行；
+- 外部工具可用 fake connector 测试。
 
-## Phase 4 — Extensibility
+## 阶段 5：运行时门面与产品入口
 
-**Modules**
+文件：
 
-`config.py`, `skills.py`, `hooks.py`, `profiles.py`, `external.py`
+- `runtime.py`
+- `tools_misc.py`
+- `collab.py`
+- `snapshots.py`
+- `service.py`
+- `cli.py`
 
-**Implementation notes**
+实现：
 
-- TOML configuration supports providers, runtime, skills, profiles, hooks, and
-  external servers; secrets remain environment references.
-- Skills advertise metadata and require explicit load for the full body.
-- Hooks receive JSON, have a timeout, and can deny but never broaden permission.
-- Profiles compile into a constrained agent factory.
-- `spawn_task` invokes a child agent with its own history and permission mode.
-- The external JSON-RPC client namespaces tool names and kills timed-out
-  processes.
+- Runtime 门面；
+- Provider 工厂；
+- 自动上下文压缩；
+- 会话审计和恢复；
+- Skill/任务笔记/请求输入工具；
+- 协作任务板和邮箱；
+- Git 快照；
+- `ask`、`chat`、`sessions`、`config-check`、`worker`、`serve`；
+- 本地 HTTP 服务。
 
-**Tests**
+验收：
 
-- config layer merge and secret resolution;
-- skill discovery, front matter validation, and load;
-- hook allow/deny/error behavior;
-- profile tool restriction and recursion block;
-- external initialize/list/call through a fake transport.
+- CLI 支持文本和 JSONL；
+- REPL 可压缩退出；
+- 服务请求返回事件；
+- 任务板可持久化；
+- 非 Git 仓库不能创建快照。
 
-**Exit criteria**
+## 阶段 6：学习与发布
 
-A specialist profile can run a bounded subtask, and an external tool can be
-listed and called without coupling the core to a vendor SDK.
+已完成：
 
-## Phase 5 — Crews, Snapshots, Service, and CLI
+- 中文 README；
+- 中文架构说明；
+- 中文学习路线；
+- 示例配置；
+- 发布检查清单；
+- 全量测试。
 
-**Modules**
+发布前检查：
 
-`collab.py`, `snapshots.py`, `service.py`, `cli.py`, `repl.py`
+```bash
+python -m unittest discover -s tests
+git status --short
+git log --oneline
+```
 
-**Implementation notes**
+条件：
 
-- Crew state is persisted as JSON and updated through a single coordinator.
-- In-process workers share the provider but never share mutable history.
-- External workers receive task JSON and return final JSON.
-- Git snapshot commands are checked before worktree creation and fail cleanly
-  outside a repository.
-- Service handlers translate HTTP requests into runtime calls without global
-  mutable state.
-- The REPL and one-shot command call the same runtime facade.
-- `/compact`, `/sessions`, and `/resume` operate on persisted state.
-
-**Tests**
-
-- task board lifecycle and mailbox routing;
-- concurrent worker completion and stop;
-- snapshot create/status/cleanup with a temporary repository;
-- service request validation and event serialization;
-- CLI exit codes and REPL commands using injected streams.
-
-**Exit criteria**
-
-A user can install the entry point, run `ask`, `chat`, `worker`, and `serve`,
-and complete a local coding task with session recovery.
-
-## Phase 6 — Learning and Release Hardening
-
-**Deliverables**
-
-- architecture document explaining the data flow;
-- configuration examples;
-- threat model and permission examples;
-- release checklist;
-- full test run;
-- tagged `v0.1.0` release commit.
-
-**Definition of done**
-
-1. `python -m unittest discover -s tests` passes on Python 3.11+.
-2. No required third-party runtime dependency exists.
-3. Configuration, safety, persistence, extension, collaboration, and CLI tests
-   all have explicit assertions.
-4. Documentation contains no visual branding and no inherited style.
-5. A new user can understand the runtime from `README.md` and `docs/`.
+1. 全部测试通过；
+2. 无第三方运行时依赖；
+3. 文档、注释和示例一致；
+4. 无明文密钥；
+5. 无未解释的破坏性操作；
+6. 标记 `v0.1.0`。

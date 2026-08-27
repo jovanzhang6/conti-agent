@@ -1,0 +1,55 @@
+# 主 Provider。密钥只能来自环境变量。
+[[provider]]
+name = "primary"
+protocol = "openai"
+base_url = "https://api.example.com/v1"
+model = "example-model"
+api_key_env = "EXAMPLE_API_KEY"
+context_window = 128000
+max_output_tokens = 8192
+
+# 离线示例。不要在生产环境依赖 fake。
+[[provider]]
+name = "offline"
+protocol = "fake"
+base_url = "local://fake"
+model = "fake-model"
+
+[runtime]
+permission_mode = "workspace"
+max_tool_iterations = 32
+history_limit = 120
+
+[extensions]
+skills = true
+hooks = true
+profiles = true
+external_tools = true
+collaboration = true
+
+[[profile]]
+name = "reader"
+description = "只读调查，适合先理解代码再动手。"
+system_prompt = "只收集证据，引用路径和行号，不修改文件。"
+allowed_tools = [
+  "workspace_read",
+  "workspace_list",
+  "workspace_search",
+  "load_skill",
+]
+permission_mode = "read_only"
+max_tool_iterations = 12
+
+[[hook]]
+event = "tool.before"
+match_tool = "process_run"
+command = ["python", ".conti/hooks/check.py"]
+timeout_ms = 5000
+continue_on_error = false
+
+[[external_server]]
+name = "docs"
+command = ["python", ".conti/external/docs_server.py"]
+
+[external_server.env]
+DOCS_INDEX = "./.conti/data/docs.json"

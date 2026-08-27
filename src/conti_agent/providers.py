@@ -42,7 +42,7 @@ class Provider(ABC):
 
 
 class FakeProvider(Provider):
-    """A deterministic provider for tests and offline demonstrations."""
+    """用于测试和离线示例的确定性 Provider。"""
 
     protocol = "fake"
 
