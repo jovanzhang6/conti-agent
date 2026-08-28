@@ -158,19 +158,31 @@ def create_default_registry() -> CommandRegistry:
             item = context.runtime.get_provider_info(name)
             return CommandResult([f"当前模型已经是 {name}（{item['model']}）。"])
         try:
-            context.runtime.set_active_provider(name)
+            switched = context.runtime.set_active_provider(
+                name, session_id=context.session_id
+            )
             item = context.runtime.get_provider_info(name)
         except Exception as exc:
             return CommandResult([f"模型切换失败：{exc}"], status="error")
+        if switched.get("created_session"):
+            # 新会话还没有第一条消息；轻量 session 已作为磁盘锚点创建。
+            lines = [f"已切换到 {item['name']}（{item['model']}）。"
+                     "发送第一条消息后开始保存对话。"]
+        else:
+            lines = [f"已切换到 {item['name']}（{item['model']}）。"
+                     "当前会话历史继续保留。"]
         return CommandResult(
-            [f"模型已切换为 {item['name']}（{item['model']}）。"],
-            data={"provider": item},
+            lines,
+            session_id=switched.get("session_id"),
+            data={"provider": item, "switched": switched},
         )
 
     def status_handler(context: CommandContext, arguments: list[str]) -> CommandResult:
         info = context.runtime.describe()
-        return CommandResult([f"{key}: {value}" for key, value in info.items()],
-                             data={"runtime": info})
+        lines = [f"{key}: {value}" for key, value in info.items()]
+        lines.append(f"session: {context.session_id or '新会话（尚未创建）'}")
+        return CommandResult(lines, data={"runtime": info,
+                                          "session_id": context.session_id})
 
     def activity_handler(context: CommandContext, arguments: list[str]) -> CommandResult:
         if context.activity_provider is None:
@@ -190,12 +202,21 @@ def create_default_registry() -> CommandRegistry:
 
     async def resume_handler(context: CommandContext, arguments: list[str]) -> CommandResult:
         session_id = arguments[0]
-        context.runtime.sessions.load(session_id)
+        loader = getattr(context.runtime, "load_session_history", None)
+        try:
+            history = loader(session_id) if loader else []
+        except Exception as exc:
+            return CommandResult([f"恢复会话失败：{exc}"], status="error")
         context.session_id = session_id
-        return CommandResult(
-            [f"已恢复会话 {session_id}。历史消息回填将在后续提交提供。"],
-            session_id=session_id,
-        )
+        lines = [f"已恢复会话 {session_id}。"]
+        if history:
+            user_count = sum(1 for item in history if item.get("role") == "user")
+            assistant_count = sum(1 for item in history
+                                  if item.get("role") == "assistant")
+            lines.append(
+                f"历史已回填：{user_count} 条用户消息，{assistant_count} 条助手回复。"
+            )
+        return CommandResult(lines, session_id=session_id, data={"history": history})
 
     async def compact_handler(context: CommandContext, arguments: list[str]) -> CommandResult:
         if not context.session_id:

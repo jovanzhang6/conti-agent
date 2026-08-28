@@ -6,9 +6,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from prompt_toolkit.application import Application
+from prompt_toolkit.data_structures import Point
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.layout import (
+    ConditionalContainer,
     Dimension,
     FormattedTextControl,
     HSplit,
@@ -17,7 +20,9 @@ from prompt_toolkit.layout import (
     VSplit,
     Window,
 )
-from prompt_toolkit.data_structures import Point
+from prompt_toolkit.formatted_text.utils import split_lines
+from prompt_toolkit.layout.controls import UIContent, UIControl
+from prompt_toolkit.mouse_events import MouseEventType, MouseEvent
 from prompt_toolkit.widgets import Frame, TextArea
 from .activity import format_tool_completed, format_tool_started
 from .commands import CommandContext
@@ -40,6 +45,62 @@ class ChatMessage:
     streaming: bool = False
 
 
+@dataclass
+class ViewportState:
+    """对话流的显式视口状态。
+
+    坐标统一使用 prompt_toolkit wrap 模式的“逻辑行”（未折行的原始行）：
+    scroll_offset 是视口锚点（游标所在逻辑行），content_height 是总逻辑行数，
+    window_height 与 page_lines 是显示行数。follow_bottom 表示“跟随最新消息”；
+    用户上翻后进入手动阅读模式，新消息不再抢占视图。
+    """
+
+    scroll_offset: int = 0
+    follow_bottom: bool = True
+    content_height: int = 0
+    window_height: int = 0
+    page_lines: int = 0
+
+    @property
+    def last_anchor(self) -> int:
+        return max(0, self.content_height - 1)
+
+    @property
+    def page_size(self) -> int:
+        return max(1, self.page_lines or self.window_height)
+
+    def clamp(self) -> int:
+        self.scroll_offset = max(0, min(self.scroll_offset, self.last_anchor))
+        return self.scroll_offset
+
+    def scroll_up(self, amount: int = 5) -> None:
+        if amount <= 0:
+            return
+        # scroll_offset 由滚动条每帧从渲染结果同步回真实视口顶部，
+        # 从跟随模式离开时直接从当前位置上移，而不是从内容末尾推算。
+        self.follow_bottom = False
+        self.scroll_offset = max(0, self.scroll_offset - amount)
+
+    def scroll_down(self, amount: int = 5) -> None:
+        if amount <= 0 or self.follow_bottom:
+            return
+        # 是否到达底部由渲染结果（最后一行是否可见）判定并恢复跟随。
+        self.scroll_offset = min(self.last_anchor, self.scroll_offset + amount)
+
+    def page_up(self) -> None:
+        self.scroll_up(self.page_size - 1)
+
+    def page_down(self) -> None:
+        self.scroll_down(self.page_size - 1)
+
+    def scroll_to_top(self) -> None:
+        self.follow_bottom = False
+        self.scroll_offset = 0
+
+    def scroll_to_bottom(self) -> None:
+        self.follow_bottom = True
+
+
 class TuiState:
     """TUI 的纯状态层，便于不启动终端就测试。"""
 
@@ -53,7 +114,6 @@ class TuiState:
         self.busy = False
         self.tool_count = 0
         self.error_count = 0
-        self.cursor_row = 0
         self.pending_activities: dict[str, tuple[str, dict[str, Any]]] = {}
         self.add_system(
             "输入任务后按 Enter 发送。/help 查看命令，Ctrl+C 取消当前任务，Ctrl+Q 退出。"
@@ -145,11 +205,6 @@ class TuiState:
             fragments.append(("", message.text or ("..." if message.streaming else "")))
             if message.streaming:
                 fragments.append(("class:streaming", "▌"))
-        # ScrollablePane 通过 cursor position 跟随最新消息；
-        # show_cursor=False 只是不绘制光标，不影响滚动定位。
-        self.cursor_row = max(0, sum(
-            fragment[1].count("\n") for fragment in fragments
-        ))
         return fragments
 
     def render_sidebar(self) -> list[tuple[str, str]]:
@@ -194,6 +249,185 @@ class TuiState:
         return fragments
 
 
+class ConversationControl(FormattedTextControl):
+    """对话流控件：渲染前同步视口尺寸，并把游标锚定在可视区内。
+
+    Window._scroll 在 create_content 之后运行，因此这里先记录
+    当前渲染的真实行数；游标固定在视口顶部（或贴底模式的最后一行），
+    避免内置的“游标必须可见”逻辑把滚动位置拽回底部。
+    """
+
+    def __init__(self, state: TuiState, viewport: ViewportState) -> None:
+        super().__init__(
+            state.render_conversation,
+            show_cursor=False,
+            get_cursor_position=self._cursor_position,
+        )
+        self.viewport = viewport
+
+    def create_content(self, width: int, height: int | None) -> Any:
+        content = super().create_content(width, height)
+        # 布局阶段 height 为 None，此时不能覆盖真实渲染尺寸。
+        if height is None:
+            return content
+        self.viewport.content_height = content.line_count
+        self.viewport.window_height = int(height)
+        # super() 计算游标时用的还是上一帧行数；这里用本帧真实行数
+        # 重建 UIContent，保证“游标锚点”驱动的滚动不滞后。
+        corrected = Point(0, self._cursor_line(content.line_count))
+        if content.cursor_position != corrected:
+            return UIContent(
+                get_line=content.get_line,
+                line_count=content.line_count,
+                show_cursor=False,
+                cursor_position=corrected,
+            )
+        return content
+
+    def _cursor_line(self, line_count: int) -> int:
+        viewport = self.viewport
+        if viewport.follow_bottom:
+            return max(0, line_count - 1)
+        return min(viewport.clamp(), max(0, line_count - 1))
+
+    def _cursor_position(self) -> Point:
+        return Point(0, self._cursor_line(self.viewport.content_height))
+
+
+class ViewportWindow(Window):
+    """对话窗体：滚轮事件接入显式视口，而不是依赖 Window 内部滚动。"""
+
+    def __init__(self, viewport: ViewportState, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.viewport = viewport
+
+    def _scroll(self, ui_content: Any, width: int, height: int) -> None:
+        # wrap 模式下 Window 的 vertical_scroll 只增不减（粘性贴底）；
+        # 手动阅读时每帧先把滚动复位到锚点，游标可见性逻辑会保持该位置。
+        if not self.viewport.follow_bottom:
+            self.vertical_scroll = self.viewport.clamp()
+        super()._scroll(ui_content, width, height)
+
+    def _mouse_handler(self, mouse_event: MouseEvent) -> Any:
+        event_type = mouse_event.event_type
+        if event_type == MouseEventType.SCROLL_UP:
+            self.viewport.scroll_up(3)
+            return None
+        if event_type == MouseEventType.SCROLL_DOWN:
+            self.viewport.scroll_down(3)
+            return None
+        return super()._mouse_handler(mouse_event)
+
+
+class ScrollbarControl(UIControl):
+    """滚动条内容控件。
+
+    显示位置以对话窗体上一帧（本帧已更新）的 render_info.vertical_scroll
+    为准：wrap_lines 模式下 Window 的滚动由游标锚点驱动，视口的
+    scroll_offset 只是输入值，真实位置必须从渲染结果读回。
+    每次调用都重新计算，不能缓存。
+    """
+
+    def __init__(self, viewport: ViewportState, body_window: Any) -> None:
+        self.viewport = viewport
+        self.body_window = body_window
+
+    def create_content(self, width: int, height: int | None) -> UIContent:
+        lines = list(split_lines(self._fragments()))
+        return UIContent(
+            get_line=lambda index: lines[index],
+            line_count=len(lines),
+            show_cursor=False,
+            cursor_position=Point(0, 0),
+        )
+
+    def preferred_height(self, width: int, max_available_height: int,
+                         wrap_lines: bool = False,
+                         get_line_prefix: Any = None) -> int:
+        return 3
+
+    def _sync_from_body(self) -> tuple[int, int] | None:
+        info = self.body_window.render_info
+        if info is None:
+            return None
+        viewport = self.viewport
+        offset = max(0, int(info.vertical_scroll))
+        content = max(0, int(info.content_height))
+        displayed = getattr(info, "displayed_lines", None)
+        viewport.content_height = content
+        viewport.window_height = max(1, int(info.window_height))
+        viewport.page_lines = max(1, len(displayed)) if displayed else viewport.window_height
+        viewport.scroll_offset = offset
+        # 最后一行可见即视为在底部：滚轮/翻页滚到底、内容缩短时恢复跟随。
+        if info.bottom_visible:
+            viewport.follow_bottom = True
+        return offset, content
+
+    def _fragments(self) -> list[tuple[str, str]]:
+        state = self._sync_from_body()
+        if state is None:
+            return []
+        offset, content = state
+        if content <= 1 or content <= self.viewport.window_height:
+            return []
+        fragments: list[tuple[str, str]] = [("class:scrollbar-arrow", "▲\n")]
+        track = max(1, self.viewport.window_height - 2)
+        thumb = max(1, min(
+            track,
+            round(track * self.viewport.window_height / content),
+        ))
+        max_anchor = max(1, content - 1)
+        thumb_top = round(min(1.0, offset / max_anchor) * (track - thumb))
+        for row in range(track):
+            if thumb_top <= row < thumb_top + thumb:
+                fragments.append(("class:scrollbar-thumb", "█\n"))
+            else:
+                fragments.append(("class:scrollbar-track", "│\n"))
+        fragments.append(("class:scrollbar-arrow", "▼"))
+        return fragments
+
+
+class ScrollbarWindow(Window):
+    """对话流右侧的一列滚动条：显示位置，支持滚轮、点击跳转和拖动。"""
+
+    def __init__(self, viewport: ViewportState, body_window: Any,
+                 **kwargs: Any) -> None:
+        super().__init__(ScrollbarControl(viewport, body_window), width=1, **kwargs)
+        self.viewport = viewport
+
+    def _mouse_handler(self, mouse_event: MouseEvent) -> Any:
+        event_type = mouse_event.event_type
+        viewport = self.viewport
+        if event_type == MouseEventType.SCROLL_UP:
+            viewport.scroll_up(3)
+            return None
+        if event_type == MouseEventType.SCROLL_DOWN:
+            viewport.scroll_down(3)
+            return None
+        if event_type not in (MouseEventType.MOUSE_DOWN, MouseEventType.MOUSE_MOVE):
+            return NotImplemented
+        info = self.render_info
+        if info is None:
+            return None
+        if viewport.content_height <= 1:
+            return None
+        height = int(info.window_height)
+        y = mouse_event.position.y - int(getattr(info, "_y_offset", 0))
+        if y <= 0:
+            viewport.scroll_up(3)
+        elif y >= height - 1:
+            viewport.scroll_down(3)
+        else:
+            track = max(1, height - 2)
+            fraction = min(1.0, max(0.0, (y - 1) / track))
+            viewport.follow_bottom = False
+            viewport.scroll_offset = round(fraction * viewport.last_anchor)
+            # 拖到最底部等同重新跟随最新消息。
+            if viewport.scroll_offset >= viewport.last_anchor:
+                viewport.follow_bottom = True
+        return None
+
+
 class ContiTui:
     """独立的 prompt_toolkit 全屏界面，不依赖任何原项目视觉。"""
 
@@ -202,14 +436,13 @@ class ContiTui:
         self.output = output
         self.input = input
         self.state = TuiState(runtime.describe())
+        self.viewport = ViewportState()
         self.sidebar_visible = False
         self.current_task: asyncio.Task | None = None
         self.command_registry = runtime.commands
         self.command_completer = CommandCompleter(self)
-        self.conversation_control = FormattedTextControl(
-            self.state.render_conversation,
-            show_cursor=False,
-            get_cursor_position=self._conversation_cursor,
+        self.conversation_control = ConversationControl(
+            self.state, self.viewport
         )
         self.sidebar_control = FormattedTextControl(
             self.state.render_sidebar,
@@ -262,6 +495,32 @@ class ContiTui:
         async def _toggle_panel(event: Any) -> None:
             self._toggle_panel()
 
+        @kb.add("pageup", eager=True)
+        async def _page_up(event: Any) -> None:
+            self.viewport.page_up()
+
+        @kb.add("pagedown", eager=True)
+        async def _page_down(event: Any) -> None:
+            self.viewport.page_down()
+
+        @kb.add("c-up", eager=True)
+        async def _line_up(event: Any) -> None:
+            self.viewport.scroll_up(2)
+
+        @kb.add("c-down", eager=True)
+        async def _line_down(event: Any) -> None:
+            self.viewport.scroll_down(2)
+
+        input_empty = Condition(lambda: not self.input_control.text)
+
+        @kb.add("home", filter=input_empty, eager=True)
+        async def _to_top(event: Any) -> None:
+            self.viewport.scroll_to_top()
+
+        @kb.add("end", filter=input_empty, eager=True)
+        async def _to_bottom(event: Any) -> None:
+            self.viewport.scroll_to_bottom()
+
         return TextArea(
             multiline=False,
             wrap_lines=True,
@@ -271,24 +530,27 @@ class ContiTui:
         )
 
     def _conversation(self) -> Any:
-        control = Window(
+        body = ViewportWindow(
+            self.viewport,
             self.conversation_control,
             wrap_lines=True,
             always_hide_cursor=True,
             get_vertical_scroll=self._conversation_scroll,
-    )
+        )
         return Frame(
-            ScrollablePane(control, display_arrows=True),
+            VSplit([body, ScrollbarWindow(self.viewport, body)]),
             title="对话流",
         )
 
     def _conversation_scroll(self, window: Any) -> int:
-        """对话 pane 始终跟随底部，避免最新回复落在视口外。"""
+        """非折行模式的滚动回退；wrap 模式由 ConversationControl 游标锚点驱动。"""
+        viewport = self.viewport
         info = window.render_info
-        return max(0, int(info.content_height) - int(info.window_height))
-
-    def _conversation_cursor(self) -> Any:
-        return Point(0, max(0, getattr(self.state, "cursor_row", 0) - 1))
+        max_scroll = max(0, int(info.content_height) - int(info.window_height))
+        if viewport.follow_bottom:
+            viewport.scroll_offset = max_scroll
+            return viewport.scroll_offset
+        return max(0, min(viewport.scroll_offset, max_scroll))
 
     def _sidebar(self) -> Any:
         control = Window(
@@ -313,40 +575,6 @@ class ContiTui:
         if self.sidebar_visible:
             children.append(self._sidebar())
         return VSplit(children)
-
-    def _root_layout(self) -> Any:
-        header = Window(
-            FormattedTextControl(self._header_fragments, show_cursor=False),
-            height=1,
-            style="class:header",
-        )
-        model_status = Window(
-            FormattedTextControl(self._model_status_fragments, show_cursor=False),
-            height=1,
-            style="class:footer",
-        )
-        shortcuts = Window(
-            FormattedTextControl(self._shortcut_fragments, show_cursor=False),
-            height=1,
-            style="class:footer",
-        )
-        return HSplit([
-            header,
-            self.layout,
-            model_status,
-            shortcuts,
-        ])
-
-    def _rebuild_layout(self) -> None:
-        self.layout = self._build_layout()
-        self.application.layout = Layout(
-            self._root_layout(),
-            focused_element=self.input_control,
-        )
-
-    def _toggle_panel(self) -> None:
-        self.sidebar_visible = not self.sidebar_visible
-        self._rebuild_layout()
 
     def _header_fragments(self) -> list[tuple[str, str]]:
         info = self.state.runtime_info
@@ -376,13 +604,29 @@ class ContiTui:
             ("class:status-sep", "│"),
             ("class:status-key", " Ctrl+Q 退出 "),
             ("class:status-sep", "│"),
+            ("class:status-key", " PageUp 翻页 "),
+            ("class:status-sep", "│"),
             (style, f" {self.state.status} "),
         ]
 
     def _status_fragments(self) -> list[tuple[str, str]]:
         return self._model_status_fragments()
 
-    def _build_application(self) -> Application:
+    def _screen_too_small(self) -> bool:
+        try:
+            size = self.application.output.get_size()
+        except Exception:
+            return False
+        return size.columns < 40 or size.rows < 8
+
+    def _too_small_fragments(self) -> list[tuple[str, str]]:
+        return [
+            ("class:system-heading", "终端窗口太小\n\n"),
+            ("", "请把终端窗口放大到至少 40 列 × 8 行，再使用对话界面。\n"),
+        ]
+
+    def _root_layout(self) -> Any:
+        too_small = Condition(self._screen_too_small)
         header = Window(
             FormattedTextControl(self._header_fragments, show_cursor=False),
             height=1,
@@ -398,13 +642,36 @@ class ContiTui:
             height=1,
             style="class:footer",
         )
-        root = HSplit([header, self.layout, model_status, shortcuts])
-        layout = Layout(root, focused_element=self.input_control)
+        hint = Window(
+            FormattedTextControl(self._too_small_fragments, show_cursor=False),
+            style="class:muted",
+        )
+        return HSplit([
+            ConditionalContainer(header, filter=~too_small),
+            ConditionalContainer(self.layout, filter=~too_small),
+            ConditionalContainer(model_status, filter=~too_small),
+            ConditionalContainer(shortcuts, filter=~too_small),
+            ConditionalContainer(hint, filter=too_small),
+        ])
+
+    def _rebuild_layout(self) -> None:
+        self.layout = self._build_layout()
+        self.application.layout = Layout(
+            self._root_layout(),
+            focused_element=self.input_control,
+        )
+
+    def _toggle_panel(self) -> None:
+        self.sidebar_visible = not self.sidebar_visible
+        self._rebuild_layout()
+
+    def _build_application(self) -> Application:
+        layout = Layout(self._root_layout(), focused_element=self.input_control)
         return Application(
             layout=layout,
             key_bindings=self.key_bindings,
             full_screen=True,
-            mouse_support=False,
+            mouse_support=True,
             style=self._style(),
             output=self.output,
             input=self.input,
@@ -430,6 +697,9 @@ class ContiTui:
             "footer": "bg:#101820 #dbe7ee",
             "status-key": "#89ddff bold",
             "status-sep": "#445767",
+            "scrollbar-arrow": "#445767",
+            "scrollbar-thumb": "#0ea5e9",
+            "scrollbar-track": "#33414d",
         })
 
     def invalidate(self) -> None:
@@ -465,6 +735,9 @@ class ContiTui:
             self.state.messages.clear()
             self.state.activity.clear()
 
+        if result.data.get("history") is not None:
+            self._backfill_history(result.data["history"])
+
         # 模型或 /status 执行后刷新界面缓存。
         self.state.runtime_info = self.runtime.describe()
         self.state.status = result.output[0] if result.output else result.status
@@ -473,8 +746,27 @@ class ContiTui:
         for line in result.output:
             self.state.add_system(line)
 
+        # 命令输出要求可见，恢复跟随底部。
+        self.viewport.scroll_to_bottom()
+
         if result.exit_requested:
             self.application.exit(result="exit")
+
+    def _backfill_history(self, history: list[dict[str, Any]]) -> None:
+        """把磁盘会话消息回填到对话流；工具消息只进入活动栏。"""
+        self.state.messages.clear()
+        for item in history:
+            role = item.get("role")
+            content = item.get("content") or ""
+            if role in ("user", "assistant"):
+                if content:
+                    self.state.append_message(str(role), str(content))
+            elif role == "tool":
+                if content:
+                    self.state.append_activity(f"工具结果：{str(content)[:80]}")
+            elif role == "system":
+                if content:
+                    self.state.add_system(str(content))
 
     async def _compact_session(self, session_id: str) -> str:
         from .cli import compact_session
@@ -483,6 +775,8 @@ class ContiTui:
     async def run_prompt(self, prompt: str) -> None:
         self.state.append_message("user", prompt)
         self.state.append_message("assistant", streaming=True)
+        # 用户主动发送消息时回到跟随模式，确保看到最新回复。
+        self.viewport.scroll_to_bottom()
         self.state.busy = True
         self.state.status = "AI 正在处理"
         self.invalidate()

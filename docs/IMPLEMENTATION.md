@@ -16,7 +16,7 @@
 | WP-07 发布工程 | 进行中 | 文档一致性、发布检查、tag 移动 |
 | WP-09 独立全屏 TUI | 已完成 | 自有 ASCII 启动图、三栏工作台、流式对话 |
 | WP-10 Windows exe 发布 | 已完成 | PyInstaller 单文件、真实模型/TUI 验证 |
-| WP-11 TUI 缺陷修复 | 进行中 | WP-11A/B/E 已完成；滚动与布局重构进行中 |
+| WP-11 TUI 缺陷修复 | 进行中 | WP-11A/B/C/E 已完成；信息架构与压力测试待做 |
 | WP-08 后续能力 | 未开始 | 记忆检索、Anthropic 流式、服务鉴权、OS 沙箱 |
 
 ## WP-00：独立仓库与规格
@@ -657,30 +657,56 @@ python -m conti_agent.cli --config .conti/config.toml chat
 3. 新增 `list_providers()`；
 4. 新增 `get_provider_info()`；
 5. 新增 `active_provider_name()`；
-6. 新增 `set_active_provider()`；
-7. busy 时禁止切换；
-8. 切换成功后更新主 Agent、Profile 子代理和上下文窗口；
-9. 切换失败时保留原模型。
-
-行式模式和 TUI 均已接入：
-
-1. `/models`；
-2. `/model <name>`；
-3. `/activity`；
-4. 命令候选。
+6. 新增 `set_active_provider(name, *, session_id=None)`：
+   - busy 时禁止切换；
+   - 切换成功后更新主 Agent、Profile 子代理和上下文窗口；
+   - 切换失败时保留原模型；
+   - 已有 session 时向同一账本追加 `model.switched` 事件；
+   - 没有 session（新会话还没发消息）时创建轻量 session 作为磁盘锚点，
+     `session.started` 记录初始 provider/model；
+   - 返回切换轨迹字典（from/to provider、model、session_id、created_session）。
+7. `Runtime.ask()` 创建 session 时在 `session.started` 写入当前 provider/model；
+8. `SessionStore` 新增 `append_event()` / `append_model_switch()`；
+   `load()` 兼容旧账本（无 provider 元数据可加载，`model.switched` 不产生消息）；
+9. 行式模式和 TUI 均已接入 `/models`、`/model <name>`、`/activity`、命令候选；
+10. `/model` 输出“当前会话历史继续保留”或“发送第一条消息后开始保存对话”，
+    不清空对话、不重置 session；
+11. `/status` 显示当前 session；
+12. 真实模型验证：切换到 fake 再切回 deepseek 后，真实模型凭历史答出约定代号；
+    session JSONL 完整记录 `session.started`（含 provider/model）和两次 `model.switched`。
 
 ### WP-11C：ConversationViewport
 
-改动点：
+状态：已完成基础版（显式视口 + 键盘/滚轮/滚动条）。
 
-1. 停止每次渲染强制到底；
-2. 增加 `follow_bottom` 和 manual scroll；
-3. PageUp/PageDown/Home/End；
-4. 鼠标滚轮和滚动条；
-5. resize 后重建；
-6. 小窗口降级到行式模式或提示页。
+关键实现（`src/conti_agent/tui.py`）：
 
-这是下一步优先任务。完整交接上下文、实现方案和验收标准见
+1. 新增 `ViewportState`：`scroll_offset` / `follow_bottom` / `content_height` /
+   `window_height` / `page_lines`，坐标统一使用 prompt_toolkit wrap 模式的逻辑行；
+2. 弃用对话 pane 的 `ScrollablePane`（3.0.53 的滚动条纯装饰、无鼠标处理，
+   且焦点在输入框时 pane 永不自动滚动——这是“滚动条拖不动、内容显示不全”的根因）；
+3. `ConversationControl`：渲染时同步真实行数，并把游标锚定在视口内
+   （wrap 模式的滚动由“游标必须可见”驱动）；
+4. `ViewportWindow`：滚轮事件接入视口；手动阅读时每帧把 `vertical_scroll`
+   复位到锚点（wrap 模式的 vertical_scroll 有只增不减的粘性）；
+5. `ScrollbarControl` + `ScrollbarWindow`：右侧 1 列自绘滚动条，
+   从对话窗体 `render_info` 读回真实滚动位置，支持滚轮、点击跳转和拖动；
+   最后一行可见时自动恢复跟随；
+6. 键位：PageUp/PageDown 翻页、Home/End 顶部/底部（输入框为空时生效，
+   输入时仍是行首/行尾）、Ctrl+Up/Ctrl+Down 逐行滚动；
+7. 用户发送消息或执行命令后恢复跟随；手动阅读时流式新消息不抢视图；
+8. 终端小于 40×8 时显示提示页；
+9. 无头渲染测试覆盖：跟随底部、上翻、新消息不抢视图、拖动、翻页到底、
+   小窗口 resize；真实终端手测覆盖 PageUp/Home/End/Ctrl+Up、/model 切换提示、
+   小窗口布局、Ctrl+Q 退出恢复。
+
+遗留（后续小项）：
+
+1. 鼠标滚轮/滚动条拖动的真实终端点击验证受自动化帧同步限制，
+   事件链路已由无头渲染按 prompt_toolkit 原生鼠标分发路径验证；
+2. 视觉选择/复制模式（WP-09 已知限制）仍未来做。
+
+完整交接上下文见
 [`docs/HANDOFF_WP11_TUI_HISTORY_SCROLL.md`](HANDOFF_WP11_TUI_HISTORY_SCROLL.md)。
 
 ### WP-11D：信息架构重构
@@ -822,21 +848,26 @@ python -m conti_agent.cli --config .conti/config.toml chat
 
 不允许只改测试让问题消失。
 
+### 已记录缺陷
+
+| 编号 | 复现命令 | 期望 | 实际 | 根因与修复 |
+|---|---|---|---|---|
+| D-01 | exe `chat --line` 管道输入中文 | 正常进入会话并保存 | `UnicodeEncodeError: surrogates not allowed` 崩溃 | 管道 stdin 按系统 ANSI 代码页解码产生代理字符。修复：`exe_entry.py` 对 stdin `reconfigure(encoding="utf-8")`；`sessions.py` `_append` 编码兜底，代理字符不进账本 |
+
 ## 当前验收快照
 
 ```text
-自动化测试：51 passed
-真实 ask：passed
-真实 chat：passed
-TUI module/Application：passed
-TUI startup ASCII：passed
-workspace_read：passed
-workspace_write：passed
-hook allow：passed
-hook deny：passed
-external docs.echo：passed
-exe offline ask：passed
-exe live ask：passed
-exe live TUI：passed
+自动化测试：64 passed
+真实 ask：passed（exe + deepseek）
+真实 chat --line 多轮：passed
+模型切换历史保留：passed（fake↔deepseek 往返后真实模型答出约定代号）
+session JSONL：passed（session.started 含 provider/model，model.switched 轨迹完整）
+/resume 回填：passed（行式输出“历史已回填”，恢复后切换仍记入同一账本）
+TUI 启动/布局：passed（小窗口 80x18 / 90x22）
+TUI 流式对话：passed
+TUI PageUp/Home/End/Ctrl+Up：passed（真实终端）
+TUI /model 切换提示：passed（“当前会话历史继续保留”入对话流）
+TUI Ctrl+Q 退出：passed（alternate screen 退出，终端恢复）
+viewport 无头渲染：passed（跟随底部/上翻/新消息不抢视图/拖动/翻页/resize）
 真实密钥入库：not found
 ```

@@ -57,7 +57,8 @@ class SessionStore:
             raise SessionError("非法的会话 ID")
         return self.directory / f"{session_id}.jsonl"
 
-    def create(self, workspace: Path, title: str = "") -> tuple[str, list[dict[str, Any]]]:
+    def create(self, workspace: Path, title: str = "",
+               metadata: dict[str, Any] | None = None) -> tuple[str, list[dict[str, Any]]]:
         session_id = uuid.uuid4().hex
         record = {
             "schema_version": SESSION_SCHEMA_VERSION,
@@ -67,12 +68,17 @@ class SessionStore:
             "workspace": str(workspace),
             "title": title,
         }
+        if metadata:
+            record.update(metadata)
         self._append(session_id, record)
         return session_id, []
 
     def _append(self, session_id: str, record: dict[str, Any]) -> None:
+        # 兜底：来源异常的代理字符不写入账本，也不让编码错误拖垮会话保存。
+        payload = json.dumps(record, ensure_ascii=False, sort_keys=True)
+        line = payload.encode("utf-8", errors="replace").decode("utf-8") + "\n"
         with self._path(session_id).open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.write(line)
 
     def append_message(self, session_id: str, message: dict[str, Any]) -> None:
         self._append(session_id, {
@@ -91,6 +97,27 @@ class SessionStore:
             "summary": summary,
             "compacted_count": compacted_count,
         })
+
+    def append_event(self, session_id: str, kind: str,
+                     **fields: Any) -> None:
+        """追加一条通用事件记录；事件不参与消息回放。"""
+        self._append(session_id, {
+            "schema_version": SESSION_SCHEMA_VERSION,
+            "kind": kind,
+            "timestamp": time.time(),
+            **fields,
+        })
+
+    def append_model_switch(self, session_id: str, *, from_provider: str,
+                            from_model: str, to_provider: str,
+                            to_model: str) -> None:
+        self.append_event(
+            session_id, "model.switched",
+            from_provider=from_provider,
+            from_model=from_model,
+            to_provider=to_provider,
+            to_model=to_model,
+        )
 
     def list(self) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
@@ -134,6 +161,9 @@ class SessionStore:
                             "role": "system",
                             "content": "[历史摘要]\n" + record["summary"],
                         }]
+                    elif record["kind"] == "model.switched":
+                        # 模型切换事件只用于审计和轨迹，不产生对话消息。
+                        pass
                     else:
                         raise SessionError(f"未知账本记录：{record['kind']}")
         except json.JSONDecodeError as exc:

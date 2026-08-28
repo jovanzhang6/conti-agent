@@ -205,6 +205,34 @@ permission_mode = "workspace"
         self.assertEqual(resumed[1]["tool_calls"][0].name, "t")
         self.assertEqual(store.list()[0]["session_id"], session_id)
 
+    def test_session_metadata_and_model_switch(self) -> None:
+        store = SessionStore(self.root / ".conti")
+        session_id, _ = store.create(self.root, "模型轨迹",
+                                     metadata={"provider": "p1", "model": "m1"})
+        store.append_message(session_id, user_message("继续"))
+        store.append_model_switch(session_id, from_provider="p1", from_model="m1",
+                                  to_provider="p2", to_model="m2")
+        metadata, resumed = store.load(session_id)
+        self.assertEqual(metadata["provider"], "p1")
+        self.assertEqual(metadata["model"], "m1")
+        # model.switched 是事件记录，不产生对话消息。
+        self.assertEqual(len(resumed), 1)
+        self.assertEqual(resumed[0]["content"], "继续")
+
+    def test_legacy_session_without_provider_metadata_loads(self) -> None:
+        store = SessionStore(self.root / ".conti")
+        session_id, _ = store.create(self.root, "旧格式")
+        path = store.directory / f"{session_id}.jsonl"
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + '{"schema_version": 1, "kind": "message.appended", "timestamp": 1,'
+              ' "message": {"role": "user", "content": "旧消息"}}\n',
+            encoding="utf-8",
+        )
+        metadata, resumed = store.load(session_id)
+        self.assertNotIn("provider", metadata)
+        self.assertEqual(resumed[0]["content"], "旧消息")
+
     def test_session_corruption_is_rejected(self) -> None:
         store = SessionStore(self.root / ".conti")
         session_id, _ = store.create(self.root)

@@ -1,5 +1,21 @@
 # WP-11 续工交接：TUI 滚动、Resize 与模型切换历史
 
+> **状态更新（2026-08-28）：本文档描述的目标 1/2/3 与 Step 1-6 已全部实现并验证。**
+>
+> - 单元测试 64 个全部通过（新增 viewport / model-switch / session 事件 / resume 回填覆盖）；
+> - 真实模型验证：`fake↔deepseek` 往返切换后，真实模型凭同一 session 历史答出约定代号；
+> - session JSONL 记录 `session.started`（provider/model）+ `model.switched` 轨迹；
+> - `/resume` 历史回填已实现（`Runtime.load_session_history` + TUI 回填 + 行式提示）；
+> - 真实终端手测：小窗口布局、流式对话、PageUp/Home/End/Ctrl+Up、
+>   `/model` 切换提示、Ctrl+Q 退出恢复全部通过；
+> - 实现要点与“为什么必须这样做”（prompt_toolkit wrap 模式的游标驱动滚动、
+>   vertical_scroll 粘性、片段缓存按 render_counter）记录在
+>   `docs/IMPLEMENTATION.md` 的 WP-11B / WP-11C 小节；
+> - 遗留：鼠标滚轮与滚动条拖动的真实终端点击级验证（事件链路已按原生分发路径
+>   无头验证）、小窗口“降级到行式模式”（已实现提示页）、WP-11D 信息架构与 WP-09E 压测。
+>
+> 以下原文保留作为方案与验收标准记录。
+
 这份文档是独立交接说明。新会话只需先读这份文件，就可以继续当前工作，不需要重新推导上下文。
 
 ## 1. 当前状态

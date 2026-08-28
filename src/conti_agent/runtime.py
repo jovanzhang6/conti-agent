@@ -132,18 +132,50 @@ class Runtime:
     def active_provider_name(self) -> str:
         return self.provider_config.name
 
-    def set_active_provider(self, name: str) -> None:
-        """切换 active provider；busy 时禁止，构建成功后才提交。"""
+    def set_active_provider(self, name: str,
+                            *, session_id: str | None = None) -> dict[str, Any]:
+        """切换 active provider；busy 时禁止，构建成功后才提交。
+
+        返回切换轨迹字典。已有 session 时把 model.switched 事件写入同一账本；
+        没有 session（新会话还没发过消息）时创建一个轻量 session 作为磁盘锚点，
+        之后的第一条消息会继续写入这个 session。
+        """
         if self.busy:
             raise ConfigurationError("当前任务运行中，不能切换模型")
         config = self.provider_configs.get(name)
         if config is None:
             raise ConfigurationError(f"未知模型：{name}。使用 /models 查看可用模型。")
+        from_provider = self.provider_config.name
+        from_model = self.provider_config.model
         provider = create_provider(config)
         self.provider_config = config
         self.provider = provider
         self.profile_runner.provider = provider
         self._update_context_window(config)
+        created_session = False
+        if session_id is None:
+            session_id, _ = self.sessions.create(
+                self.workspace.root,
+                title=f"初始模型 {config.name}",
+                metadata={"provider": config.name, "model": config.model},
+            )
+            created_session = True
+        else:
+            self.sessions.append_model_switch(
+                session_id,
+                from_provider=from_provider,
+                from_model=from_model,
+                to_provider=config.name,
+                to_model=config.model,
+            )
+        return {
+            "from_provider": from_provider,
+            "from_model": from_model,
+            "to_provider": config.name,
+            "to_model": config.model,
+            "session_id": session_id,
+            "created_session": created_session,
+        }
 
     def _update_context_window(self, config: ProviderConfig) -> None:
         self.context_manager.context_window = config.context_window or 128_000
@@ -165,6 +197,11 @@ class Runtime:
             "external_tools_enabled": self.config.external_tools_enabled,
         }
 
+    def load_session_history(self, session_id: str) -> list[dict[str, Any]]:
+        """读取一个 session 的完整消息历史，供界面回填显示。"""
+        _, messages = self.sessions.load(session_id)
+        return messages
+
     async def ask(self, prompt: str, *, session_id: str | None = None,
                   output_format: str = "text",
                   text_callback: Callable[[str], None] | None = None,
@@ -173,7 +210,14 @@ class Runtime:
         self.busy = True
         created = False
         if session_id is None:
-            session_id, _ = self.sessions.create(self.workspace.root, prompt[:60])
+            session_id, _ = self.sessions.create(
+                self.workspace.root,
+                prompt[:60],
+                metadata={
+                    "provider": self.provider_config.name,
+                    "model": self.provider_config.model,
+                },
+            )
             created = True
         else:
             _, messages = self.sessions.load(session_id)

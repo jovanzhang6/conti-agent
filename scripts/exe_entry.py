@@ -11,6 +11,13 @@ if sys.platform == "win32":
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
+    # 管道输入按 UTF-8 解码；否则按系统 ANSI 代码页解码会产生代理字符，
+    # 写入会话账本时直接崩溃。
+    if sys.stdin is not None and hasattr(sys.stdin, "reconfigure"):
+        try:
+            sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
 
 from conti_agent.cli import main
 
