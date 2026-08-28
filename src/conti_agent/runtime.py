@@ -7,9 +7,9 @@ from typing import Any, AsyncIterator, Callable
 from .agent import Agent, AgentRunConfig
 from .config import AppConfig, ProviderConfig, load_config
 from .commands import create_default_registry
-from .context import ContextManager
-from .errors import ConfigurationError
-from .events import AgentEvent
+from .context import ContextManager, ResultSpiller, default_summary
+from .errors import ConfigurationError, ProviderError
+from .events import AgentEvent, event
 from .external import ExternalToolManager, StdioExternalConnector
 from .hooks import HookEngine
 from .messages import user_message
@@ -30,6 +30,27 @@ from .workspace import Workspace
 
 
 InputFunction = Callable[[str], str]
+
+# 上下文超限的识别关键词：命中后静默压缩并重试，不向用户抛错。
+_CONTEXT_OVERFLOW_MARKERS = (
+    "context length",
+    "maximum context",
+    "context window",
+    "too many tokens",
+    "input tokens",
+    "reduce the length",
+    "prompt is too long",
+    "请求过长",
+    "上下文长度",
+    "超出上下文",
+)
+
+_COMPACT_SYSTEM_PROMPT = (
+    "你是会话压缩器。把较早的对话历史压缩成一份摘要，作为后续对话延续上下文的唯一依据。"
+    "必须保留：用户的目标与约束、已完成的工作、关键结论与决定、涉及或修改过的文件路径、"
+    "当前待办事项、用户的明确偏好。失败过的尝试只保留一句结论。"
+    "不要评论、不要提问，用紧凑的中文分节输出（目标/已完成/结论/文件/待办）。"
+)
 
 
 def create_provider(provider: ProviderConfig):
@@ -94,6 +115,7 @@ class Runtime:
         self.external_managers: list[ExternalToolManager] = []
         self.auditor = AuditLogger(self.root / "runtime" / "audit.jsonl")
         self.sessions = SessionStore(self.root)
+        self.result_spiller = ResultSpiller(self.root / "spill")
         schema_tokens = sum(len(str(tool.parameters)) // 4 for tool in self.registry.all())
         self.context_manager = ContextManager(
             context_window=self.provider_config.context_window or 128_000,
@@ -226,35 +248,49 @@ class Runtime:
         messages.append(user_message(prompt))
         self.sessions.append_message(session_id, user_message(prompt))
         messages.insert(0, {"role": "system", "content": self._system_prompt()})
-        if self.context_manager.needs_compaction(messages):
-            compacted, summary, count = self.context_manager.compact(
-                messages, self._default_summarizer
-            )
-            messages[:] = compacted
-            self.sessions.append_compaction(session_id, summary, count)
+        events: list[AgentEvent] = []
+        if self.context_manager.needs_compaction(messages, pending=[messages[-1]]):
+            if await self.compact_messages(messages, session_id, reason="auto"):
+                events.append(event("context.compacted", reason="auto"))
         context = ToolContext(workspace=self.workspace.root, session_id=session_id,
                               services={"skill_library": self.skill_library})
-        agent = Agent(
-            self.provider, self.registry, context,
-            AgentRunConfig(max_tool_iterations=self.config.runtime.max_tool_iterations),
-            permission_checker=self.permission_checker,
-            auditor=self.auditor,
-            session_store=self.sessions,
-            session_id=session_id,
-            hook_engine=self.hook_engine,
-        )
-        events: list[AgentEvent] = []
+        self.result_spiller.reset_round()
         final_text = ""
-        async for item in agent.run(messages):
-            if output_format == "jsonl":
-                self.output_function(item.to_json())
-            if item.type == "text.delta" and text_callback and item.payload.get("text"):
-                text_callback(str(item.payload["text"]))
-            if event_callback:
-                event_callback(item)
-            events.append(item)
-            if item.type == "message.created" and item.payload.get("text"):
-                final_text = str(item.payload["text"])
+        for attempt in range(2):
+            agent = Agent(
+                self.provider, self.registry, context,
+                AgentRunConfig(max_tool_iterations=self.config.runtime.max_tool_iterations),
+                permission_checker=self.permission_checker,
+                auditor=self.auditor,
+                session_store=self.sessions,
+                session_id=session_id,
+                hook_engine=self.hook_engine,
+                result_spiller=self.result_spiller,
+            )
+            try:
+                async for item in agent.run(messages):
+                    if output_format == "jsonl":
+                        self.output_function(item.to_json())
+                    if item.type == "text.delta" and text_callback and item.payload.get("text"):
+                        text_callback(str(item.payload["text"]))
+                    if item.type == "usage.recorded":
+                        self.context_manager.observe_usage(
+                            int(item.payload.get("input_tokens", 0)),
+                            int(item.payload.get("output_tokens", 0)),
+                        )
+                    if event_callback:
+                        event_callback(item)
+                    events.append(item)
+                    if item.type == "message.created" and item.payload.get("text"):
+                        final_text = str(item.payload["text"])
+                break
+            except ProviderError as exc:
+                if attempt == 0 and self._is_context_overflow(exc):
+                    # 上下文超限：不向用户抛错，静默压缩后重试一次。
+                    if await self.compact_messages(messages, session_id, reason="overflow"):
+                        events.append(event("context.compacted", reason="overflow"))
+                    continue
+                raise
         try:
             self.sessions.append_message(
                 session_id, {"role": "assistant", "content": final_text}
@@ -262,6 +298,69 @@ class Runtime:
             return final_text, session_id, events
         finally:
             self.busy = False
+
+    @staticmethod
+    def _is_context_overflow(exc: ProviderError) -> bool:
+        text = str(exc).lower()
+        return any(marker in text for marker in _CONTEXT_OVERFLOW_MARKERS)
+
+    async def compact_messages(self, messages: list[dict[str, Any]],
+                               session_id: str | None, *,
+                               reason: str = "manual") -> str:
+        """把较早历史压缩为一条摘要 user 消息，返回摘要文本。
+
+        保留约 10K token 的近期原文；切点回退到 user 边界，保证
+        tool_use/tool_result 配对完整。摘要优先由当前模型生成，
+        失败时回退为固定规则摘要。
+        """
+        prefix = [m for m in messages if m.get("role") == "system"]
+        body = [m for m in messages if m.get("role") != "system"]
+        split = self.context_manager.split_for_compaction(body)
+        if split is None:
+            return ""
+        old, tail = split
+        summary_text = await self._summarize_old(old)
+        extras = ""
+        if session_id:
+            extras = (f"[落盘文件目录] {self.result_spiller.directory}\n"
+                      f"[会话记录] {self.root / 'sessions' / f'{session_id}.jsonl'}")
+        summary_message = {
+            "role": "user",
+            "content": "[历史摘要]\n" + summary_text + ("\n" + extras if extras else ""),
+        }
+        messages[:] = [*prefix, summary_message, *tail]
+        if session_id:
+            self.sessions.append_compaction(session_id, summary_text, len(old),
+                                            summary_message=summary_message)
+        return summary_text
+
+    async def _summarize_old(self, old: list[dict[str, Any]]) -> str:
+        if not old:
+            return "（无可压缩的历史）"
+        transcript: list[str] = []
+        for message in old:
+            content = str(message.get("content") or "")
+            calls = message.get("tool_calls")
+            line = f"[{message.get('role', '?')}] {content}"
+            if calls:
+                names = ", ".join(
+                    call.get("name", "?") if isinstance(call, dict) else call.name
+                    for call in calls
+                )
+                line += f"（调用工具：{names}）"
+            transcript.append(line)
+        prompt = (_COMPACT_SYSTEM_PROMPT + "\n\n<较早历史>\n"
+                  + "\n".join(transcript) + "\n</较早历史>")
+        try:
+            response = await self.provider.complete(
+                [{"role": "user", "content": prompt}], ToolRegistry(), None
+            )
+            text = (response.text or "").strip()
+            if text:
+                return text
+        except Exception:
+            pass
+        return default_summary(old)
 
     async def start_external_tools(self, warn=None) -> None:
         """启动配置中的外部工具服务；单个失败不拖垮主 Runtime。"""
@@ -285,14 +384,6 @@ class Runtime:
         for manager in self.external_managers:
             await manager.close()
         self.external_managers.clear()
-
-    def _default_summarizer(self, old: list[dict[str, Any]], instruction: str) -> str:
-        user_goals = [item.get("content", "") for item in old if item.get("role") == "user"]
-        return "\n".join([
-            "压缩说明：" + instruction,
-            "早期用户目标：",
-            *[f"- {goal}" for goal in user_goals[-8:]],
-        ])
 
     def _system_prompt(self) -> str:
         """为真实模型生成稳定的行为边界和当前工作区信息。"""

@@ -241,25 +241,180 @@ permission_mode = "workspace"
         with self.assertRaises(SessionError):
             store.load(session_id)
 
-    def test_context_budget_and_compaction(self) -> None:
-        manager = ContextManager(context_window=100, max_output_tokens=10)
+    def test_token_estimation_is_cjk_aware(self) -> None:
+        from conti_agent.context import estimate_tokens
+        # 宽字符（中日韩）按约 1 token/字，其余按 4 字符/token。
+        self.assertEqual(estimate_tokens("中文内容"), 4)
+        self.assertEqual(estimate_tokens("abcdefgh"), 2)
+        self.assertEqual(estimate_tokens("中文ab"), 3)
+        self.assertEqual(estimate_tokens(""), 0)
+
+    def test_compaction_trigger_and_usage_projection(self) -> None:
+        manager = ContextManager(context_window=200_000, max_output_tokens=2048)
+        # 触发点 = 窗口 - 20K 压缩输出预留 - 13K 当轮余量。
+        self.assertEqual(manager.compaction_trigger, 167_000)
+        self.assertTrue(
+            manager.needs_compaction([{"role": "user", "content": "测" * 168_000}])
+        )
+        self.assertFalse(manager.needs_compaction([{"role": "user", "content": "hi"}]))
+        # 精确基数（上次 usage）+ 待发送增量估算（含消息键值与条目开销）。
+        manager.observe_usage(100_000, 5_000)
+        self.assertEqual(
+            manager.projected_input_tokens([{"role": "user", "content": "测" * 100}]),
+            105_108,
+        )
+
+    def test_split_for_compaction_preserves_tool_pairing(self) -> None:
+        manager = ContextManager(context_window=200_000)
+        long = "y" * 400
         messages = [
-            {"role": "system", "content": "durable"},
-            *[{"role": "user", "content": f"message-{index} " + ("y" * 200)}
-              for index in range(30)],
-            {"role": "user", "content": "latest"},
+            {"role": "user", "content": "u1 " + long},
+            {"role": "assistant", "content": "",
+             "tool_calls": [{"id": "a1", "name": "t", "arguments": {}}]},
+            {"role": "tool", "content": "r1", "tool_call_id": "a1"},
+            {"role": "assistant", "content": "a1 " + long},
+            {"role": "user", "content": "u2 " + long},
+            {"role": "assistant", "content": "a2"},
         ]
-        self.assertTrue(manager.needs_compaction(messages))
-        def summarize(old: list[dict[str, Any]], instruction: str) -> str:
-            return f"{len(old)} turns summarized"
-        compacted, summary, count = manager.compact(messages, summarize, keep_recent=2)
-        self.assertEqual(summary, "29 turns summarized")
-        self.assertEqual(count, 29)
-        self.assertEqual(compacted[0]["role"], "system")
-        self.assertIn("[历史摘要]", compacted[1]["content"])
-        planned = manager.plan(messages, keep_recent=2)
-        self.assertLessEqual(planned.estimated_tokens, manager.budget)
-        self.assertEqual(planned.messages[-1]["content"], "latest")
+        split = manager.split_for_compaction(messages, keep_tokens=180)
+        self.assertIsNotNone(split)
+        old, tail = split
+        # 保留部分必须以 user 开头，tool 与 assistant 配对不被切断。
+        self.assertEqual(tail[0]["role"], "user")
+        for index, message in enumerate(tail):
+            if message["role"] == "tool":
+                self.assertEqual(tail[index - 1]["role"], "assistant")
+        self.assertTrue(old)
+        self.assertTrue(tail)
+
+    def test_compact_assembles_summary_user_message(self) -> None:
+        manager = ContextManager(context_window=200_000)
+        long = "y" * 400
+        messages = [
+            {"role": "user", "content": "u1 " + long},
+            {"role": "assistant", "content": "a1 " + long},
+            {"role": "user", "content": "u2 " + long},
+            {"role": "assistant", "content": "a2"},
+        ]
+        compacted, count = manager.compact(messages, "目标 X；结论 Y",
+                                           keep_tokens=180)
+        self.assertEqual(count, 2)
+        self.assertEqual(compacted[0]["role"], "user")
+        self.assertIn("[历史摘要]", compacted[0]["content"])
+        self.assertIn("目标 X", compacted[0]["content"])
+        self.assertEqual(compacted[1]["content"], "u2 " + long)
+        self.assertEqual(compacted[-1]["content"], "a2")
+
+    def test_default_summary_fallback_lists_user_goals(self) -> None:
+        from conti_agent.context import default_summary
+        summary = default_summary([{"role": "user", "content": "目标A"}], "保留要点")
+        self.assertIn("目标A", summary)
+        self.assertIn("保留要点", summary)
+
+    def test_result_spiller_spills_large_output(self) -> None:
+        from conti_agent.context import ResultSpiller
+        spiller = ResultSpiller(self.root / ".conti" / "spill",
+                                single_limit=100, round_limit=10_000,
+                                preview_chars=50)
+        small = spiller.process("search", "x" * 50)
+        self.assertEqual(small, "x" * 50)
+        big = spiller.process("read", "y" * 500)
+        self.assertIn("已落盘", big)
+        self.assertIn("完整内容", big)
+        self.assertIn("y" * 50, big)
+        self.assertNotIn("y" * 100, big)
+        spilled_path = Path(spiller.spilled[0])
+        self.assertTrue(spilled_path.exists())
+        self.assertEqual(spilled_path.read_text(encoding="utf-8"), "y" * 500)
+
+    def test_ledger_compaction_roundtrip_with_summary_message(self) -> None:
+        store = SessionStore(self.root / ".conti")
+        session_id, _ = store.create(self.root, "压缩回放")
+        store.append_message(session_id, user_message("旧消息"))
+        summary_message = {"role": "user", "content": "[历史摘要]\n摘要内容"}
+        store.append_compaction(session_id, "摘要内容", 1,
+                                summary_message=summary_message)
+        store.append_message(session_id, user_message("新消息"))
+        _, resumed = store.load(session_id)
+        self.assertEqual(resumed[0], summary_message)
+        self.assertEqual(resumed[1]["content"], "新消息")
+
+    async def test_runtime_compacts_silently_on_context_overflow(self) -> None:
+        from conti_agent.config import load_single
+        from conti_agent.errors import ProviderError
+        from conti_agent.providers import ProviderResponse
+        from conti_agent.runtime import Runtime
+
+        class OverflowOnceProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def complete(self, messages, registry, stream):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ProviderError(
+                        "This model's maximum context length is 128000 tokens"
+                    )
+                return ProviderResponse(text="done", usage=None)
+
+        config_path = self.root / "runtime.toml"
+        config_path.write_text(r"""
+[[provider]]
+name = "fake"
+protocol = "fake"
+base_url = "local://fake"
+model = "fake"
+[runtime]
+permission_mode = "workspace"
+""", encoding="utf-8")
+        runtime = Runtime(load_single(config_path), self.root,
+                          output_function=lambda text: None)
+        runtime.provider = OverflowOnceProvider()
+        final, _, _ = await runtime.ask("你好")
+        # 第一次请求超限：静默压缩后重试，错误不抛给用户。
+        self.assertEqual(final, "done")
+        self.assertEqual(runtime.provider.calls, 2)
+
+    async def test_compact_messages_uses_model_summary(self) -> None:
+        from conti_agent.config import load_single
+        from conti_agent.providers import ProviderResponse
+        from conti_agent.runtime import Runtime
+
+        class ScriptedProvider:
+            def __init__(self) -> None:
+                self.prompts: list[str] = []
+
+            async def complete(self, messages, registry, stream):
+                self.prompts.append(messages[-1]["content"])
+                return ProviderResponse(text="模型摘要：目标A；结论B", usage=None)
+
+        config_path = self.root / "runtime.toml"
+        config_path.write_text(r"""
+[[provider]]
+name = "fake"
+protocol = "fake"
+base_url = "local://fake"
+model = "fake"
+[runtime]
+permission_mode = "workspace"
+""", encoding="utf-8")
+        runtime = Runtime(load_single(config_path), self.root,
+                          output_function=lambda text: None)
+        provider = ScriptedProvider()
+        runtime.provider = provider
+        long = "y" * 400
+        messages = [
+            {"role": "user", "content": "目标A " + long},
+            {"role": "assistant", "content": "结论B " + long},
+            {"role": "user", "content": "u2 " + long},
+            {"role": "assistant", "content": "a2"},
+        ]
+        await runtime.compact_messages(messages, None, reason="manual")
+        # 摘要请求发给了模型，压缩结果以 user 摘要消息打头。
+        self.assertTrue(any("压缩器" in p for p in provider.prompts))
+        self.assertEqual(messages[0]["role"], "user")
+        self.assertIn("模型摘要：目标A；结论B", messages[0]["content"])
+        self.assertIn("u2 " + long, messages[-2]["content"])
 
 
 if __name__ == "__main__":

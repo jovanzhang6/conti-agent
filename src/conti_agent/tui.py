@@ -264,6 +264,10 @@ class TuiState:
             self.usage["output_tokens"] += int(payload.get("output_tokens", 0))
         elif event_type == "run.retry":
             self.append_activity(f"Provider 重试 {payload.get('attempt')}")
+        elif event_type == "context.compacted":
+            reason = str(payload.get("reason", ""))
+            note = "上下文超限" if reason == "overflow" else "上下文接近上限"
+            self.append_activity(f"{note}，已压缩早期历史为摘要")
         elif event_type == "run.failed":
             self.error_count += 1
             self.status = "运行失败"

@@ -89,14 +89,19 @@ class SessionStore:
         })
 
     def append_compaction(self, session_id: str, summary: str,
-                          compacted_count: int) -> None:
-        self._append(session_id, {
+                          compacted_count: int,
+                          summary_message: dict[str, Any] | None = None) -> None:
+        record: dict[str, Any] = {
             "schema_version": SESSION_SCHEMA_VERSION,
             "kind": "history.compacted",
             "timestamp": time.time(),
             "summary": summary,
             "compacted_count": compacted_count,
-        })
+        }
+        if summary_message is not None:
+            # 新格式：摘要以完整消息（通常是 user 角色）进入上下文。
+            record["message"] = summary_message
+        self._append(session_id, record)
 
     def append_event(self, session_id: str, kind: str,
                      **fields: Any) -> None:
@@ -157,10 +162,14 @@ class SessionStore:
                         messages.append(_decode_message(record["message"]))
                     elif record["kind"] == "history.compacted":
                         # 回放时仅保留摘要及其后续内容，压缩掉的旧消息不会恢复。
-                        messages = [{
-                            "role": "system",
-                            "content": "[历史摘要]\n" + record["summary"],
-                        }]
+                        message = record.get("message")
+                        if isinstance(message, dict):
+                            messages = [dict(message)]
+                        else:
+                            messages = [{
+                                "role": "system",
+                                "content": "[历史摘要]\n" + record["summary"],
+                            }]
                     elif record["kind"] == "model.switched":
                         # 模型切换事件只用于审计和轨迹，不产生对话消息。
                         pass

@@ -105,12 +105,9 @@ async def run_tui(runtime: Runtime) -> None:
 
 
 async def compact_session(runtime: Runtime, session_id: str) -> str:
+    """手动压缩：逻辑与自动压缩一致，仅触发方式不同。"""
     _, messages = runtime.sessions.load(session_id)
-    compacted, summary, count = runtime.context_manager.compact(
-        messages, runtime._default_summarizer
-    )
-    runtime.sessions.append_compaction(session_id, summary, count)
-    return summary
+    return await runtime.compact_messages(messages, session_id, reason="manual")
 
 
 def make_http_handler(service: RuntimeService):

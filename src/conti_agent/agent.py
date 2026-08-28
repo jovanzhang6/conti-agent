@@ -29,7 +29,7 @@ class Agent:
                  permission_checker: PermissionChecker | None = None,
                  auditor: AuditLogger | None = None,
                  session_store=None, session_id: str = "",
-                 hook_engine=None) -> None:
+                 hook_engine=None, result_spiller=None) -> None:
         self.provider = provider
         self.registry = registry
         self.context = context
@@ -39,6 +39,7 @@ class Agent:
         self.session_store = session_store
         self.session_id = session_id
         self.hook_engine = hook_engine
+        self.result_spiller = result_spiller
 
     async def _complete_with_retry(self, messages: list[dict[str, Any]],
                                    emit: Any) -> Any:
@@ -58,11 +59,14 @@ class Agent:
 
     def _handle_tool_result(self, call: ToolCall, result: ToolResult,
                             messages: list[dict[str, Any]], emit: Any) -> None:
-        """统一发出工具结果、写回消息并持久化。"""
+        """统一发出工具结果、写回消息并持久化；超大结果先落盘。"""
+        output = result.output
+        if self.result_spiller is not None and output:
+            output = self.result_spiller.process(call.name, output)
         emit(event("tool.completed", tool_call_id=call.id,
-                   tool_name=call.name, output=result.output,
+                   tool_name=call.name, output=output,
                    is_error=result.is_error, metadata=result.metadata))
-        message = tool_message(call, result.output, is_error=result.is_error)
+        message = tool_message(call, output, is_error=result.is_error)
         messages.append(message)
         if self.session_store and self.session_id:
             self.session_store.append_message(self.session_id, message)
