@@ -16,6 +16,7 @@
 | WP-07 发布工程 | 进行中 | 文档一致性、发布检查、tag 移动 |
 | WP-09 独立全屏 TUI | 已完成 | 自有 ASCII 启动图、三栏工作台、流式对话 |
 | WP-10 Windows exe 发布 | 已完成 | PyInstaller 单文件、真实模型/TUI 验证 |
+| WP-11 TUI 缺陷修复 | 规划中 | 命令/模型核心能力、滚动稳定、信息架构重构 |
 | WP-08 后续能力 | 未开始 | 记忆检索、Anthropic 流式、服务鉴权、OS 沙箱 |
 
 ## WP-00：独立仓库与规格
@@ -609,6 +610,70 @@ python -m conti_agent.cli --config .conti/config.toml chat
 2. 加入版本信息和图标；
 3. 生成 SHA-256 清单；
 4. 可选构建 zip 或 MSI。
+
+## WP-11：TUI 缺陷修复与交互重构
+
+详细缺陷清单、根因、修复顺序和验收矩阵见 [`docs/UI_REPAIR_PLAN.md`](UI_REPAIR_PLAN.md)。
+
+### 修复原则
+
+先补 Runtime 和命令能力，再改 TUI 布局。M1 完成前不新增视觉装饰。
+
+### WP-11A：CommandRegistry
+
+改动点：
+
+1. 新建 `src/conti_agent/commands.py`；
+2. 统一定义 `/help`、`/models`、`/model`、`/new`、`/status`、`/sessions`、`/resume`、`/compact`、`/activity`、`/panel`、`/clear`、`/exit`；
+3. TUI 和行式模式共用执行器；
+4. Slash 候选来自命令注册表；
+5. `/help` 自动生成。
+
+### WP-11B：Provider Registry 和模型切换
+
+改动点：
+
+1. `Runtime.list_providers()`；
+2. `Runtime.set_active_provider()`；
+3. busy 状态禁止切换；
+4. Profile 子代理跟随 active provider；
+5. session 元数据记录 provider/model；
+6. `/models` 列出全部，`/model <name>` 切换。
+
+### WP-11C：ConversationViewport
+
+改动点：
+
+1. 停止每次渲染强制到底；
+2. 增加 `follow_bottom` 和 manual scroll；
+3. PageUp/PageDown/Home/End；
+4. 鼠标滚轮和滚动条；
+5. resize 后重建；
+6. 小窗口降级到行式模式或提示页。
+
+### WP-11D：信息架构重构
+
+改动点：
+
+1. Header 只保留品牌；
+2. 当前模型和状态移到输入框下方；
+3. 侧栏默认收起；
+4. `Ctrl+B` / `/panel` 切换；
+5. 侧栏偏好持久化。
+
+### WP-11E：ActivityFormatter
+
+改动点：
+
+1. 新建 `src/conti_agent/activity.py`；
+2. 工具名和参数翻译为用户动作；
+3. 关联请求、完成、拒绝和耗时；
+4. `/activity` 查看完整记录；
+5. 侧栏只显示最近关键状态。
+
+### 验收
+
+见 [`docs/UI_REPAIR_PLAN.md`](UI_REPAIR_PLAN.md) 的 R-001 到 R-015。
 
 ## WP-08：后续能力工作包
 
