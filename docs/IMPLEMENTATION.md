@@ -15,6 +15,7 @@
 | WP-06 真实模型闭环 | 已完成 | 一次性、多轮、工具、Hook、外部工具 |
 | WP-07 发布工程 | 进行中 | 文档一致性、发布检查、tag 移动 |
 | WP-09 独立全屏 TUI | 已完成 | 自有 ASCII 启动图、三栏工作台、流式对话 |
+| WP-10 Windows exe 发布 | 已完成 | PyInstaller 单文件、真实模型/TUI 验证 |
 | WP-08 后续能力 | 未开始 | 记忆检索、Anthropic 流式、服务鉴权、OS 沙箱 |
 
 ## WP-00：独立仓库与规格
@@ -544,6 +545,71 @@ python -m conti_agent.cli --config .conti/config.toml chat
 3. 测量 60 秒流式刷新 CPU；
 4. 验证窗口 resize。
 
+## WP-10：Windows exe 发布
+
+### 目标
+
+最终用户不需要安装 Python 或创建 venv，直接运行：
+
+```powershell
+.\conti-agent.exe
+```
+
+即可进入 TUI。
+
+### 改动点
+
+1. `scripts/build_windows_exe.ps1`
+   - 自动查找项目 venv、上级 venv 或 `PYTHON`；
+   - 安装 `.[tui]` 与 PyInstaller；
+   - 运行全量测试；
+   - 构建单文件控制台 exe；
+   - 输出 `dist\conti-agent.exe`。
+2. `scripts/exe_entry.py`
+   - 使用绝对导入 `from conti_agent.cli import main`；
+   - 避免把 `cli.py` 当作顶层脚本导致相对导入失败；
+   - Windows 下设置控制台输入/输出代码页为 UTF-8；
+   - stdout/stderr reconfigure 为 UTF-8。
+3. `pyproject.toml`
+   - 新增 `build-exe` extra；
+4. `src/conti_agent/cli.py`
+   - 无子命令时默认执行 `chat`；
+   - exe 直接双击或无参数运行即进入 TUI。
+5. `conti-agent.spec`
+   - onefile；
+   - console；
+   - 收集 prompt_toolkit 数据和 hidden imports。
+
+### 验证记录
+
+| 场景 | 结果 |
+|---|---|
+| 自动化测试 | 44 passed |
+| exe 离线 ask | passed |
+| exe 真实 ask | passed，返回“程序正常” |
+| exe UTF-8 中文 | passed，无乱码 |
+| exe TUI 启动 | passed，ASCII Logo + alternate screen |
+| exe TUI `/status` | passed |
+| exe TUI 流式任务 | passed，USER/ASSISTANT 消息和 token 更新 |
+| exe TUI 退出 | passed，`Ctrl+Q` 后终端恢复 |
+
+### 已知限制
+
+1. 当前只发布 Windows x64；
+2. exe 未签名，SmartScreen 可能提示；
+3. onefile 首次启动略慢；
+4. Linux/macOS 仍使用 Python 安装方式；
+5. 后续签名、图标、版本资源和安装器属于 WP-10A。
+
+### WP-10A：签名与安装器
+
+改动点：
+
+1. 引入代码签名证书；
+2. 加入版本信息和图标；
+3. 生成 SHA-256 清单；
+4. 可选构建 zip 或 MSI。
+
 ## WP-08：后续能力工作包
 
 这些不属于本次 `v0.1.0` 必须发布项，但必须按工作包推进。
@@ -663,5 +729,8 @@ workspace_write：passed
 hook allow：passed
 hook deny：passed
 external docs.echo：passed
+exe offline ask：passed
+exe live ask：passed
+exe live TUI：passed
 真实密钥入库：not found
 ```

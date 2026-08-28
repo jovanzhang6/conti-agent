@@ -280,3 +280,6 @@ Hook 超时、非零退出码和无效 JSON 默认导致拒绝。Hook 只能拒�
 10. `python -m unittest discover -s tests` 全部通过；
 11. `chat --line` 在无 TTY 环境仍可用；
 12. 退出 TUI 后终端状态恢复，没有子进程或管道资源泄漏警告。
+13. Windows x64 构建生成单文件 `dist/conti-agent.exe`；
+14. exe 离线 `ask`、真实模型 `ask` 和 `chat --tui` 全部通过；
+15. exe 无参数时默认进入 `chat`。

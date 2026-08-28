@@ -177,9 +177,11 @@ async def run_cli(argv: list[str] | None = None, *,
     serve_parser.add_argument("--port", type=int, default=8791)
     args = parser.parse_args(argv)
 
+    # 打包 exe 后的最简体验：直接双击或运行 conti-agent.exe 进入 chat。
     if not args.command:
-        parser.print_help()
-        return 2
+        args.command = "chat"
+        args.line = False
+        args.tui = False
     try:
         runtime = build_runtime(workspace, args.config, input_function, output)
     except (ConfigurationError, ContiAgentError) as exc:

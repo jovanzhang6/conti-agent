@@ -239,11 +239,17 @@ class ContiTui:
             self.conversation_control,
             wrap_lines=True,
             always_hide_cursor=True,
+            get_vertical_scroll=self._conversation_scroll,
     )
         return Frame(
             ScrollablePane(control, display_arrows=True),
             title="对话流",
         )
+
+    def _conversation_scroll(self, window: Any) -> int:
+        """对话 pane 始终跟随底部，避免最新回复落在视口外。"""
+        info = window.render_info
+        return max(0, int(info.content_height) - int(info.window_height))
 
     def _conversation_cursor(self) -> Any:
         return Point(0, max(0, getattr(self.state, "cursor_row", 0) - 1))

@@ -50,6 +50,7 @@ git grep -nE "sk-[A-Za-z0-9]{16,}" -- .
 3. 架构文档解释数据流。
 4. 学习路线可执行。
 5. 文档和注释均为中文。
+6. 打包说明见 [`docs/PACKAGING.md`](PACKAGING.md)。
 
 ## 真实端到端检查
 
@@ -75,6 +76,12 @@ git grep -nE "sk-[A-Za-z0-9]{16,}" -- .
 18. 配置错误退出码；
 19. `chat --line` 无 TTY 兼容；
 20. CLI 退出无子进程泄漏警告。
+21. Windows exe 构建；
+22. exe 离线 `ask`；
+23. exe 真实模型 `ask`；
+24. exe UTF-8 中文输出；
+25. exe TUI 流式任务；
+26. exe TUI `Ctrl+Q` 恢复终端。
 
 当前记录：
 
@@ -91,25 +98,50 @@ read_only deny：passed
 hook deny：passed
 external docs.echo：passed
 dangerous command deny：passed
+exe offline ask：passed
+exe live ask：passed
+exe live TUI：passed
+exe UTF-8：passed
 secret scan：passed
 ```
 
 ## 发布
 
 1. 确认 `pyproject.toml` 版本为 `0.1.0`。
-2. 确认 tag 未指向旧文档提交；如果已指向旧提交，先删除：
+2. 构建 Windows 发布文件：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\build_windows_exe.ps1
+```
+
+预期产物：
+
+```text
+dist\conti-agent.exe
+```
+
+3. 用 exe 验证：
+
+```powershell
+.\dist\conti-agent.exe --help
+.\dist\conti-agent.exe --config .\.conti\config.toml config-check
+.\dist\conti-agent.exe --config .\.conti\config.toml ask "离线或真实任务"
+.\dist\conti-agent.exe --config .\.conti\config.toml chat --tui
+```
+
+4. 确认 tag 未指向旧文档提交；如果已指向旧提交，先删除：
 
 ```bash
 git tag -d v0.1.0
 ```
 
-3. 在最新验收提交上重建 tag：
+5. 在最新验收提交上重建 tag：
 
 ```bash
 git tag v0.1.0
 ```
 
-4. 推送主干和 tag：
+6. 推送主干和 tag：
 
 ```bash
 git push origin main

@@ -23,6 +23,7 @@
 - 扩展：Profile 子代理、Markdown Skill、Hook、外部 JSON-RPC 工具；
 - 协作：本地任务板和邮箱；
 - 快照：显式 Git worktree。
+- 发布：可构建 Windows x64 单文件 `conti-agent.exe`。
 
 ## 安装
 
@@ -119,6 +120,44 @@ permission_mode = "workspace"
 ```bash
 python -m conti_agent.cli ask "你好"
 ```
+
+## Windows exe 发布
+
+构建发布文件：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\build_windows_exe.ps1
+```
+
+成功后生成：
+
+```text
+dist\conti-agent.exe
+```
+
+把 `conti-agent.exe` 放到你的工作目录，并在同一目录准备：
+
+```text
+workspace\
+  conti-agent.exe
+  .conti\config.toml
+```
+
+然后直接运行：
+
+```powershell
+.\conti-agent.exe
+```
+
+默认进入全屏 TUI。也可以显式指定任务：
+
+```powershell
+.\conti-agent.exe --config .\.conti\config.toml ask "检查当前项目"
+.\conti-agent.exe --config .\.conti\config.toml chat
+.\conti-agent.exe --config .\.conti\config.toml chat --line
+```
+
+当前产物是 Windows x64 控制台程序。首次运行时 Windows SmartScreen 可能提示未签名发布文件；选择本机可信来源后继续即可。
 
 ### 3. 其他真实模型
 

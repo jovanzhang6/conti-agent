@@ -440,7 +440,73 @@ git grep -nE "sk-[A-Za-z0-9]{16,}" -- .
 2. 没有密钥格式命中；
 3. `git status --short` 干净。
 
-## 12. 测试结果记录模板
+## 12. 发布版 exe 测试
+
+先构建：
+
+```powershell
+Set-Location D:\path\to\conti-agent
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\build_windows_exe.ps1
+```
+
+产物：
+
+```text
+dist\conti-agent.exe
+```
+
+进入测试工作区后检查配置：
+
+```powershell
+D:\path\to\conti-agent\dist\conti-agent.exe --config .\.conti\config.toml config-check
+```
+
+再测试离线任务：
+
+```powershell
+D:\path\to\conti-agent\dist\conti-agent.exe --config .\.conti\config.toml ask "exe smoke"
+```
+
+测试真实模型：
+
+```powershell
+D:\path\to\conti-agent\dist\conti-agent.exe --config .\.conti\config.toml ask "请只回复四个汉字：程序正常"
+```
+
+在真实终端测试 TUI：
+
+```powershell
+D:\path\to\conti-agent\dist\conti-agent.exe --config .\.conti\config.toml chat --tui
+```
+
+TUI 内执行：
+
+```text
+/status
+请只回复四个汉字：程序正常
+```
+
+最后按：
+
+```text
+Ctrl+Q
+```
+
+通过标准：
+
+1. 不需要 Python；
+2. 配置检查退出码为 0；
+3. exe 离线任务退出码为 0；
+4. exe 真实模型中文输出无乱码；
+5. TUI 显示 CONTI ASCII 启动图；
+6. 全屏三栏界面出现；
+7. `/status` 正常；
+8. 流式任务显示 USER 和 ASSISTANT；
+9. token 用量更新；
+10. `Ctrl+Q` 后终端恢复正常；
+11. 没有子进程泄漏警告。
+
+## 13. 测试结果记录模板
 
 每轮端到端测试记录：
 
@@ -470,6 +536,9 @@ commit：
 17. config error exit code：passed / failed
 18. unittest：passed / failed
 19. secret scan：passed / failed
+20. exe offline ask：passed / failed
+21. exe live ask：passed / failed
+22. exe TUI：passed / failed
 ```
 
 失败时补充：
