@@ -91,6 +91,19 @@ model = "override"
         self.assertEqual(merged.providers[0].model, "override")
         self.assertEqual(merged.runtime.max_tool_iterations, 7)
 
+    def test_local_config_allows_direct_api_key(self) -> None:
+        path = self.root / "local-secret.toml"
+        path.write_text(r"""
+[[provider]]
+name = "local"
+protocol = "openai-compat"
+base_url = "https://example.com"
+model = "m"
+api_key = "local-only-key"
+""", encoding="utf-8")
+        config = load_single(path)
+        self.assertEqual(config.providers[0].resolve_api_key(), "local-only-key")
+
     def test_skill_discovery_and_load(self) -> None:
         directory = self.root / ".conti" / "skills"
         directory.mkdir(parents=True)

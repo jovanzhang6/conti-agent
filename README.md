@@ -217,6 +217,36 @@ python -m conti_agent.cli chat
 
 ## 配置
 
+### 本地直用（推荐）
+
+在当前工作区创建 `.conti/config.local.toml`，可以直接写 Key，不需要环境变量：
+
+```toml
+[[provider]]
+name = "deepseek"
+protocol = "openai-compat"
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"
+api_key = "你的 DeepSeek API Key"
+
+[runtime]
+permission_mode = "workspace"
+```
+
+这个文件已被 `.gitignore` 排除，不会提交。运行时优先读取 `api_key`，其次才是 `api_key_env`。
+
+直接运行：
+
+```powershell
+.\dist\conti-agent.exe
+```
+
+或执行一次性任务：
+
+```powershell
+.\dist\conti-agent.exe ask "检查当前项目"
+```
+
 配置使用 TOML。默认加载顺序从低到高是：
 
 1. `~/.conti-agent/config.toml`
@@ -233,7 +263,7 @@ python -m conti_agent.cli --config .conti/config.toml ask "你好"
 
 重要约束：
 
-- API Key 只允许放在环境变量中，通过 `api_key_env` 引用；
+- Git 内示例只允许 `api_key_env`；Git 外的本地配置可使用 `api_key`；
 - 权限模式使用 `read_only`、`workspace`、`approved`、`trusted`；
 - 模型能力不能绕过本地权限策略。
 

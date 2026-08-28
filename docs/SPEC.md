@@ -105,10 +105,23 @@ external_tools = true
 collaboration = true
 ```
 
+本地直用时，可在 Git 外的 `.conti/config.local.toml` 中直写 Key：
+
+```toml
+[[provider]]
+name = "deepseek"
+protocol = "openai-compat"
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"
+api_key = "你的本地 API Key"
+```
+
+解析优先级是 `api_key` > `api_key_env`。`config.local.toml` 不进入 Git。
+
 约束：
 
 - 支持 `openai`、`openai-compat`、`anthropic`、`fake`；
-- API Key 只能来自 `api_key_env`，不允许明文；
+- Git 内示例只使用 `api_key_env`；Git 外本地配置可使用 `api_key`；
 - Provider 名称必须唯一；
 - 权限模式只允许 `read_only`、`workspace`、`approved`、`trusted`。
 

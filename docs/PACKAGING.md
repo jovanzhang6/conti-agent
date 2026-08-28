@@ -8,7 +8,7 @@
 workspace/
   conti-agent.exe
   .conti/
-    config.toml
+    config.local.toml
 ```
 
 不需要安装 Python、创建 venv、设置 `PYTHONPATH` 或运行包管理器。
@@ -36,7 +36,23 @@ cd D:\path\to\workspace
 .\conti-agent.exe
 ```
 
-前提是当前目录存在 `.conti/config.toml`。
+前提是当前目录存在 `.conti/config.local.toml` 或 `.conti/config.toml`。
+
+本地直用配置：
+
+```toml
+[[provider]]
+name = "deepseek"
+protocol = "openai-compat"
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"
+api_key = "你的本地 API Key"
+
+[runtime]
+permission_mode = "workspace"
+```
+
+`.conti/config.local.toml` 已被 `.gitignore` 排除。
 
 ### 显式配置
 
@@ -57,6 +73,6 @@ cd D:\path\to\workspace
 ## 5. 安全说明
 
 1. exe 只打包运行时代码，不打包 API Key；
-2. Key 仍必须通过 `api_key_env` 指向环境变量；
+2. Git 内示例仍使用 `api_key_env`；Git 外本地配置可使用 `api_key`；
 3. 当前 exe 未签名，SmartScreen 可能提示；
 4. 官方发布应附 SHA-256 校验值。

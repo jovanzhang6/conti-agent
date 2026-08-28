@@ -21,10 +21,14 @@ class ProviderConfig:
     base_url: str
     model: str
     api_key_env: str = ""
+    api_key: str = ""
     context_window: int = 0
     max_output_tokens: int = 8192
 
     def resolve_api_key(self) -> str:
+        # 本地未提交配置可以直接写 api_key，优先级高于环境变量。
+        if self.api_key:
+            return self.api_key
         if not self.api_key_env:
             return ""
         return os.environ.get(self.api_key_env, "")
@@ -91,6 +95,7 @@ def _parse_provider(raw: dict[str, Any]) -> ProviderConfig:
         base_url=_require(raw, "base_url", "provider"),
         model=_require(raw, "model", "provider"),
         api_key_env=raw.get("api_key_env", ""),
+        api_key=raw.get("api_key", ""),
         context_window=int(raw.get("context_window", 0)),
         max_output_tokens=int(raw.get("max_output_tokens", 8192)),
     )
