@@ -865,7 +865,7 @@ session JSONL：passed（session.started 含 provider/model，model.switched 轨
 /resume 回填：passed（行式输出“历史已回填”，恢复后切换仍记入同一账本）
 TUI 启动/布局：passed（小窗口 80x18 / 90x22）
 TUI 流式对话：passed
-TUI PageUp/Home/End/Ctrl+Up：passed（真实终端）
+TUI PageUp/End/Ctrl+Up：passed（真实终端）；PageDown/Home 同代码路径由无头渲染覆盖
 TUI /model 切换提示：passed（“当前会话历史继续保留”入对话流）
 TUI Ctrl+Q 退出：passed（alternate screen 退出，终端恢复）
 viewport 无头渲染：passed（跟随底部/上翻/新消息不抢视图/拖动/翻页/resize）

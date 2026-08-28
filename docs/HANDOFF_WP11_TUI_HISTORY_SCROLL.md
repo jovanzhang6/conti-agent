@@ -6,8 +6,9 @@
 > - 真实模型验证：`fake↔deepseek` 往返切换后，真实模型凭同一 session 历史答出约定代号；
 > - session JSONL 记录 `session.started`（provider/model）+ `model.switched` 轨迹；
 > - `/resume` 历史回填已实现（`Runtime.load_session_history` + TUI 回填 + 行式提示）；
-> - 真实终端手测：小窗口布局、流式对话、PageUp/Home/End/Ctrl+Up、
->   `/model` 切换提示、Ctrl+Q 退出恢复全部通过；
+> - 真实终端手测：小窗口布局、流式对话、PageUp/End/Ctrl+Up、
+>   `/model` 切换提示、Ctrl+Q 退出恢复全部通过（PageDown/Home 与已测按键同代码路径，
+>   由无头渲染覆盖）；
 > - 实现要点与“为什么必须这样做”（prompt_toolkit wrap 模式的游标驱动滚动、
 >   vertical_scroll 粘性、片段缓存按 render_counter）记录在
 >   `docs/IMPLEMENTATION.md` 的 WP-11B / WP-11C 小节；
