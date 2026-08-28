@@ -43,9 +43,10 @@ class FakeRuntime:
 @unittest.skipIf(ContiTui is None, "未安装 prompt-toolkit")
 class TuiTestCase(unittest.TestCase):
     def test_startup_logo_is_independent_ascii(self) -> None:
-        self.assertIn("C O N T I", STARTUP_LOGO)
-        self.assertIn("A G E N T", STARTUP_LOGO)
         self.assertIn("____", STARTUP_LOGO)
+        # 启动图只保留 CONTI 字样，不附加 AGENT/TUI 标题。
+        self.assertNotIn("AGENT", STARTUP_LOGO.upper())
+        self.assertNotIn("TUI", STARTUP_LOGO.upper())
 
     def test_stream_delta_and_finish(self) -> None:
         state = TuiState(FakeRuntime().describe())
