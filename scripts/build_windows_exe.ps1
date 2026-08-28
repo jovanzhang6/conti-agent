@@ -31,6 +31,9 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   --onefile `
   --console `
   --name "conti-agent" `
+  --specpath "build-release" `
+  --workpath "build-release" `
+  --distpath "dist" `
   --paths "src" `
   --collect-all "prompt_toolkit" `
   "scripts/exe_entry.py"

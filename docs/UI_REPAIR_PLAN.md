@@ -362,3 +362,23 @@ CommandState：命令、历史、候选
 2. P1：UI-020、UI-021、UI-022、UI-013；
 3. P2：UI-030、UI-031、UI-032、UI-033；
 4. P3：UI-035、UI-024、UI-034。
+
+## 6. 当前进度
+
+已完成：
+
+1. `CommandRegistry`；
+2. `/models`；
+3. `/model <name>`；
+4. Slash 命令候选；
+5. `/model <name>` 参数候选；
+6. TUI / 行式模式共用命令执行器；
+7. Runtime busy 状态和模型切换保护。
+8. `ActivityFormatter`。
+9. `/activity` 当前界面活动列表。
+
+进行中：
+
+1. ConversationViewport；
+2. 侧栏可收起已有基础实现，交互打磨未完成；
+3. 模型和状态已移到输入框下方，但滚动行为仍需按 M2 重做。

@@ -86,7 +86,7 @@ git grep -nE "sk-[A-Za-z0-9]{16,}" -- .
 当前记录：
 
 ```text
-自动化测试：44 passed
+自动化测试：51 passed
 真实 ask：passed
 真实 chat：passed
 TUI startup ASCII：passed

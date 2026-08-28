@@ -16,7 +16,7 @@
 | WP-07 发布工程 | 进行中 | 文档一致性、发布检查、tag 移动 |
 | WP-09 独立全屏 TUI | 已完成 | 自有 ASCII 启动图、三栏工作台、流式对话 |
 | WP-10 Windows exe 发布 | 已完成 | PyInstaller 单文件、真实模型/TUI 验证 |
-| WP-11 TUI 缺陷修复 | 规划中 | 命令/模型核心能力、滚动稳定、信息架构重构 |
+| WP-11 TUI 缺陷修复 | 进行中 | WP-11A/B/E 已完成；滚动与布局重构进行中 |
 | WP-08 后续能力 | 未开始 | 记忆检索、Anthropic 流式、服务鉴权、OS 沙箱 |
 
 ## WP-00：独立仓库与规格
@@ -585,7 +585,7 @@ python -m conti_agent.cli --config .conti/config.toml chat
 
 | 场景 | 结果 |
 |---|---|
-| 自动化测试 | 44 passed |
+| 自动化测试 | 51 passed |
 | exe 离线 ask | passed |
 | exe 真实 ask | passed，返回“程序正常” |
 | exe UTF-8 中文 | passed，无乱码 |
@@ -629,6 +629,16 @@ python -m conti_agent.cli --config .conti/config.toml chat
 4. Slash 候选来自命令注册表；
 5. `/help` 自动生成。
 
+已完成：
+
+1. 新增 `src/conti_agent/commands.py`；
+2. 新增 `CommandSpec`、`CommandContext`、`CommandResult`、`CommandSuggestion`；
+3. Runtime、TUI 和行式模式共用 `CommandRegistry`；
+4. TUI 输入 `/` 时显示候选；
+5. `/model` 参数候选显示 provider 名称；
+6. `/resume` 参数候选显示 session id；
+7. 测试覆盖候选、未知命令、缺少参数、模型列表和模型切换。
+
 ### WP-11B：Provider Registry 和模型切换
 
 改动点：
@@ -639,6 +649,25 @@ python -m conti_agent.cli --config .conti/config.toml chat
 4. Profile 子代理跟随 active provider；
 5. session 元数据记录 provider/model；
 6. `/models` 列出全部，`/model <name>` 切换。
+
+已完成：
+
+1. Runtime 保存全部 `provider_configs`；
+2. Runtime 不再固定使用第一个 provider；
+3. 新增 `list_providers()`；
+4. 新增 `get_provider_info()`；
+5. 新增 `active_provider_name()`；
+6. 新增 `set_active_provider()`；
+7. busy 时禁止切换；
+8. 切换成功后更新主 Agent、Profile 子代理和上下文窗口；
+9. 切换失败时保留原模型。
+
+行式模式和 TUI 均已接入：
+
+1. `/models`；
+2. `/model <name>`；
+3. `/activity`；
+4. 命令候选。
 
 ### WP-11C：ConversationViewport
 
@@ -670,6 +699,15 @@ python -m conti_agent.cli --config .conti/config.toml chat
 3. 关联请求、完成、拒绝和耗时；
 4. `/activity` 查看完整记录；
 5. 侧栏只显示最近关键状态。
+
+已完成：
+
+1. 新增 `src/conti_agent/activity.py`；
+2. 内建 `workspace_read/write/edit/list/search`、`process_run`、`request_input`、`task_note`、`spawn_task`、`load_skill` 的用户文案；
+3. 工具请求显示“开始读取 / 开始写入 / 开始执行”；
+4. 工具完成显示“已完成 / 失败”和耗时；
+5. `/activity` 可查看本次界面的活动列表；
+6. 测试覆盖读取、写入、执行和失败状态。
 
 ### 验收
 
@@ -784,7 +822,7 @@ python -m conti_agent.cli --config .conti/config.toml chat
 ## 当前验收快照
 
 ```text
-自动化测试：44 passed
+自动化测试：51 passed
 真实 ask：passed
 真实 chat：passed
 TUI module/Application：passed

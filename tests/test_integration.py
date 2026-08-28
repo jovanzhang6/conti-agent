@@ -63,7 +63,7 @@ model = "fake-model"
         inputs = iter(["/sessions", "/compact", "/exit"])
         await run_chat(runtime, session_id, lambda prompt: next(inputs), self.outputs.append)
         self.assertTrue(any("existing" in line for line in self.outputs))
-        self.assertTrue(any("已压缩历史" in line for line in self.outputs))
+        self.assertTrue(any("历史已压缩" in line for line in self.outputs))
 
     def test_crew_board_and_mailbox(self) -> None:
         root = self.root / "crew"

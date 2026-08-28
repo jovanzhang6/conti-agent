@@ -506,7 +506,40 @@ Ctrl+Q
 10. `Ctrl+Q` 后终端恢复正常；
 11. 没有子进程泄漏警告。
 
-## 13. 测试结果记录模板
+## 13. TUI 命令与模型切换测试
+
+进入：
+
+```powershell
+.\dist\conti-agent.exe chat --tui
+```
+
+依次输入：
+
+```text
+/models
+/status
+```
+
+如果配置了多个模型，再输入：
+
+```text
+/model <model-name>
+/models
+```
+
+通过标准：
+
+1. 输入 `/` 或 `/m` 时出现候选；
+2. `/models` 列出全部 provider/model；
+3. active 模型有标记；
+4. `/model <name>` 切换后，输入框下方显示新模型；
+5. busy 时 `/model` 被拒绝；
+6. 未知模型返回明确错误；
+7. `/activity` 显示当前活动记录；
+8. `/panel` 可切换右侧面板。
+
+## 14. 测试结果记录模板
 
 每轮端到端测试记录：
 
@@ -539,6 +572,10 @@ commit：
 20. exe offline ask：passed / failed
 21. exe live ask：passed / failed
 22. exe TUI：passed / failed
+23. slash completion：passed / failed
+24. /models：passed / failed
+25. /model switch：passed / failed
+26. /activity：passed / failed
 ```
 
 失败时补充：

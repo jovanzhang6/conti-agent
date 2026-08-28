@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable, TextIO
 
 from .collab import CrewManager
+from .commands import CommandContext
 from .config import load_config
 from .errors import ConfigurationError, ContiAgentError
 from .runtime import Runtime
@@ -48,39 +49,23 @@ async def run_chat(runtime: Runtime, session_id: str | None,
         except (EOFError, KeyboardInterrupt):
             output_function("")
             return
-        if prompt.strip() == "/exit":
-            return
-        if prompt.strip() == "/help":
-            output_function("命令：/new、/status、/sessions、/resume <id>、/compact、/exit")
-            continue
-        if prompt.strip() == "/new":
-            session_id = None
-            output_function("已开启新会话。")
-            continue
-        if prompt.strip() == "/status":
-            for key, value in info.items():
-                if key == "tools":
-                    output_function(f"{key}: {len(value)} 个")
-                else:
-                    output_function(f"{key}: {value}")
-            continue
-        if prompt.strip() == "/sessions":
-            for item in runtime.sessions.list():
-                output_function(f"{item['session_id']}  {item['title']}")
-            continue
-        if prompt.strip().startswith("/resume "):
-            session_id = prompt.strip().split(maxsplit=1)[1]
-            runtime.sessions.load(session_id)
-            output_function(f"已恢复 {session_id}")
-            continue
-        if prompt.strip() == "/compact":
-            if session_id is None:
-                output_function("当前没有会话可压缩。")
-            else:
-                summary = await compact_session(runtime, session_id)
-                output_function(f"已压缩历史。摘要字数：{len(summary)}")
-            continue
         if not prompt.strip():
+            continue
+        if runtime.commands.is_command(prompt):
+            context = CommandContext(
+                runtime,
+                session_id=session_id,
+                compact_session=lambda sid: compact_session(runtime, sid),
+            )
+            result = await runtime.commands.execute(prompt, context)
+            for line in result.output:
+                output_function(line)
+            if result.new_session_requested:
+                session_id = None
+            elif result.session_id is not None:
+                session_id = result.session_id
+            if result.exit_requested:
+                return
             continue
         output_function("助手：")
         streamed = False

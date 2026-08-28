@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 from .agent import Agent, AgentRunConfig
-from .config import AppConfig, load_config
+from .config import AppConfig, ProviderConfig, load_config
+from .commands import create_default_registry
 from .context import ContextManager
 from .errors import ConfigurationError
 from .events import AgentEvent
@@ -31,11 +32,8 @@ from .workspace import Workspace
 InputFunction = Callable[[str], str]
 
 
-def create_provider(config: AppConfig):
+def create_provider(provider: ProviderConfig):
     """把 Provider 配置编译为可注入 transport 的运行时对象。"""
-    if not config.providers:
-        raise ConfigurationError("配置中没有 provider")
-    provider = config.providers[0]
     api_key = provider.resolve_api_key()
     if provider.protocol == "fake":
         return FakeProvider([ProviderResponse(
@@ -63,10 +61,15 @@ class Runtime:
                  *, input_function: InputFunction | None = None,
                  output_function: Callable[[str], None] | None = None) -> None:
         self.config = config
+        if not config.providers:
+            raise ConfigurationError("配置中没有 provider")
+        self.provider_configs = {item.name: item for item in config.providers}
         self.provider_config = config.providers[0]
         self.workspace = Workspace(workspace)
         self.root = self.workspace.root / ".conti"
-        self.provider = create_provider(config)
+        self.provider = create_provider(self.provider_config)
+        self.busy = False
+        self.commands = create_default_registry()
         self.registry = create_local_registry(self.workspace)
         self.skill_library = SkillLibrary(self.root / "skills")
         self.registry.register(LoadSkillTool(self.skill_library))
@@ -93,10 +96,11 @@ class Runtime:
         self.sessions = SessionStore(self.root)
         schema_tokens = sum(len(str(tool.parameters)) // 4 for tool in self.registry.all())
         self.context_manager = ContextManager(
-            context_window=config.providers[0].context_window or 128_000,
-            max_output_tokens=config.providers[0].max_output_tokens,
+            context_window=self.provider_config.context_window or 128_000,
+            max_output_tokens=self.provider_config.max_output_tokens,
             tool_schema_tokens=schema_tokens,
         )
+        self._update_context_window(self.provider_config)
         self.input_function = input_function or (lambda question: input(question + "\n> "))
         self.output_function = output_function or (lambda text: print(text, file=sys.stdout))
 
@@ -107,6 +111,43 @@ class Runtime:
 
     def register_extra(self, tool) -> None:
         self.registry.register(tool)
+
+    def list_providers(self) -> list[dict[str, Any]]:
+        """列出全部 provider；不返回密钥。"""
+        return [self.get_provider_info(item.name) for item in self.config.providers]
+
+    def get_provider_info(self, name: str) -> dict[str, Any]:
+        config = self.provider_configs.get(name)
+        if config is None:
+            raise ConfigurationError(f"未知模型：{name}")
+        return {
+            "name": config.name,
+            "protocol": config.protocol,
+            "model": config.model,
+            "base_url": config.base_url,
+            "active": config.name == self.provider_config.name,
+            "api_key_ready": bool(config.resolve_api_key()) or config.protocol == "fake",
+        }
+
+    def active_provider_name(self) -> str:
+        return self.provider_config.name
+
+    def set_active_provider(self, name: str) -> None:
+        """切换 active provider；busy 时禁止，构建成功后才提交。"""
+        if self.busy:
+            raise ConfigurationError("当前任务运行中，不能切换模型")
+        config = self.provider_configs.get(name)
+        if config is None:
+            raise ConfigurationError(f"未知模型：{name}。使用 /models 查看可用模型。")
+        provider = create_provider(config)
+        self.provider_config = config
+        self.provider = provider
+        self.profile_runner.provider = provider
+        self._update_context_window(config)
+
+    def _update_context_window(self, config: ProviderConfig) -> None:
+        self.context_manager.context_window = config.context_window or 128_000
+        self.context_manager.max_output_tokens = config.max_output_tokens
 
     def describe(self) -> dict[str, object]:
         """返回终端界面需要显示的运行时状态，不包含密钥。"""
@@ -129,6 +170,7 @@ class Runtime:
                   text_callback: Callable[[str], None] | None = None,
                   event_callback: Callable[[AgentEvent], None] | None = None) -> tuple[str, str, AsyncIterator[AgentEvent] | list[AgentEvent]]:
         """执行一次任务；返回 final_text、session_id 和事件集合。"""
+        self.busy = True
         created = False
         if session_id is None:
             session_id, _ = self.sessions.create(self.workspace.root, prompt[:60])
@@ -169,8 +211,13 @@ class Runtime:
             events.append(item)
             if item.type == "message.created" and item.payload.get("text"):
                 final_text = str(item.payload["text"])
-        self.sessions.append_message(session_id, {"role": "assistant", "content": final_text})
-        return final_text, session_id, events
+        try:
+            self.sessions.append_message(
+                session_id, {"role": "assistant", "content": final_text}
+            )
+            return final_text, session_id, events
+        finally:
+            self.busy = False
 
     async def start_external_tools(self, warn=None) -> None:
         """启动配置中的外部工具服务；单个失败不拖垮主 Runtime。"""

@@ -28,6 +28,8 @@ class FakeSessions:
 class FakeRuntime:
     def __init__(self) -> None:
         self.sessions = FakeSessions()
+        self.busy = False
+        self.commands = __import__("conti_agent.commands", fromlist=["create_default_registry"]).create_default_registry()
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -38,6 +40,21 @@ class FakeRuntime:
             "workspace": "W",
             "tools": ["a", "b"],
         }
+
+    def list_providers(self) -> list[dict[str, Any]]:
+        return [
+            {"name": "active", "model": "m1", "protocol": "fake",
+             "active": True, "api_key_ready": True},
+            {"name": "other", "model": "m2", "protocol": "fake",
+             "active": False, "api_key_ready": True},
+        ]
+
+    def active_provider_name(self) -> str:
+        return "active"
+
+    def set_active_provider(self, name: str) -> None:
+        if name != "other":
+            raise ValueError("unknown")
 
 
 @unittest.skipIf(ContiTui is None, "未安装 prompt-toolkit")

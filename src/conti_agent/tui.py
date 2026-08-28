@@ -7,6 +7,7 @@ from typing import Any
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.layout import (
     Dimension,
     FormattedTextControl,
@@ -18,6 +19,8 @@ from prompt_toolkit.layout import (
 )
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.widgets import Frame, TextArea
+from .activity import format_tool_completed, format_tool_started
+from .commands import CommandContext
 
 
 STARTUP_LOGO = r"""
@@ -51,6 +54,7 @@ class TuiState:
         self.tool_count = 0
         self.error_count = 0
         self.cursor_row = 0
+        self.pending_activities: dict[str, tuple[str, dict[str, Any]]] = {}
         self.add_system(
             "输入任务后按 Enter 发送。/help 查看命令，Ctrl+C 取消当前任务，Ctrl+Q 退出。"
         )
@@ -91,14 +95,27 @@ class TuiState:
         payload = event.payload
         if event_type == "tool.requested":
             self.tool_count += 1
-            self.append_activity(
-                f"工具请求 {payload.get('tool_name')}"
-            )
+            call_id = str(payload.get("tool_call_id", ""))
+            tool_name = str(payload.get("tool_name", ""))
+            arguments = payload.get("arguments", {})
+            self.pending_activities[call_id] = (tool_name, arguments)
+            self.append_activity(format_tool_started(tool_name, arguments))
         elif event_type == "tool.completed":
-            state = "失败" if payload.get("is_error") else "完成"
-            self.append_activity(
-                f"工具{state} {payload.get('tool_name')}"
+            call_id = str(payload.get("tool_call_id", ""))
+            tool_name, arguments = self.pending_activities.pop(
+                call_id, (str(payload.get("tool_name", "")), {})
             )
+            elapsed = payload.get("metadata", {}).get("elapsed")
+            state = "失败" if payload.get("is_error") else "完成"
+            if state == "失败":
+                summary = format_tool_completed(
+                    tool_name, arguments, is_error=True, elapsed=elapsed
+                )
+            else:
+                summary = format_tool_completed(
+                    tool_name, arguments, is_error=False, elapsed=elapsed
+                )
+            self.append_activity(summary)
         elif event_type == "usage.recorded":
             self.usage["input_tokens"] += int(payload.get("input_tokens", 0))
             self.usage["output_tokens"] += int(payload.get("output_tokens", 0))
@@ -185,7 +202,10 @@ class ContiTui:
         self.output = output
         self.input = input
         self.state = TuiState(runtime.describe())
+        self.sidebar_visible = False
         self.current_task: asyncio.Task | None = None
+        self.command_registry = runtime.commands
+        self.command_completer = CommandCompleter(self)
         self.conversation_control = FormattedTextControl(
             self.state.render_conversation,
             show_cursor=False,
@@ -196,8 +216,18 @@ class ContiTui:
             show_cursor=False,
         )
         self.input_control = self._make_input()
+        self.command_context = self._command_context()
         self.layout = self._build_layout()
         self.application = self._build_application()
+
+    def _command_context(self) -> CommandContext:
+        session_id = None if self.state.session_id == "新会话" else self.state.session_id
+        return CommandContext(
+            self.runtime,
+            session_id=str(session_id) if session_id is not None else None,
+            compact_session=self._compact_session,
+            activity_provider=lambda: list(self.state.activity),
+        )
 
     def _make_input(self) -> Any:
         kb = KeyBindings()
@@ -228,9 +258,15 @@ class ContiTui:
                 self.current_task.cancel()
             self.application.exit(result="exit")
 
+        @kb.add("c-b")
+        async def _toggle_panel(event: Any) -> None:
+            self._toggle_panel()
+
         return TextArea(
             multiline=False,
             wrap_lines=True,
+            completer=self.command_completer,
+            complete_while_typing=True,
             focus_on_click=True,
         )
 
@@ -268,32 +304,70 @@ class ContiTui:
 
     def _build_layout(self) -> Any:
         conversation = self._conversation()
-        sidebar = self._sidebar()
         input_frame = Frame(self.input_control, title="任务输入 — Enter 发送")
-        root = VSplit([
-            HSplit([
+        left = HSplit([
                 conversation,
                 input_frame,
-            ], height=Dimension(weight=1)),
-            sidebar,
+            ], height=Dimension(weight=1))
+        children: list[Any] = [left]
+        if self.sidebar_visible:
+            children.append(self._sidebar())
+        return VSplit(children)
+
+    def _root_layout(self) -> Any:
+        header = Window(
+            FormattedTextControl(self._header_fragments, show_cursor=False),
+            height=1,
+            style="class:header",
+        )
+        model_status = Window(
+            FormattedTextControl(self._model_status_fragments, show_cursor=False),
+            height=1,
+            style="class:footer",
+        )
+        shortcuts = Window(
+            FormattedTextControl(self._shortcut_fragments, show_cursor=False),
+            height=1,
+            style="class:footer",
+        )
+        return HSplit([
+            header,
+            self.layout,
+            model_status,
+            shortcuts,
         ])
-        return root
+
+    def _rebuild_layout(self) -> None:
+        self.layout = self._build_layout()
+        self.application.layout = Layout(
+            self._root_layout(),
+            focused_element=self.input_control,
+        )
+
+    def _toggle_panel(self) -> None:
+        self.sidebar_visible = not self.sidebar_visible
+        self._rebuild_layout()
 
     def _header_fragments(self) -> list[tuple[str, str]]:
         info = self.state.runtime_info
-        status_style = "class:status-busy" if self.state.busy else "class:status-idle"
         return [
             ("class:logo", " CONTI-AGENT "),
-            ("class:header-key", f" {info.get('model', '-')} "),
-            ("class:header-sep", " │ "),
-            ("class:header-key", f"{info.get('permission_mode', '-')} "),
-            ("class:header-sep", " │ "),
-            ("class:header-key", f" {len(info.get('tools', []))} tools "),
-            ("class:header-sep", " │ "),
-            (status_style, f" {self.state.status} "),
         ]
 
-    def _status_fragments(self) -> list[tuple[str, str]]:
+    def _model_status_fragments(self) -> list[tuple[str, str]]:
+        info = self.state.runtime_info
+        style = "class:status-busy" if self.state.busy else "class:status-idle"
+        return [
+            ("class:status-key", f" {info.get('model', '-')} "),
+            ("class:status-sep", "│"),
+            ("class:status-key", f" {info.get('permission_mode', '-')} "),
+            ("class:status-sep", "│"),
+            ("class:status-key", f" {len(info.get('tools', []))} tools "),
+            ("class:status-sep", "│"),
+            (style, f" {self.state.status} "),
+        ]
+
+    def _shortcut_fragments(self) -> list[tuple[str, str]]:
         style = "class:status-busy" if self.state.busy else "class:status-idle"
         return [
             ("class:status-key", " Enter 发送 "),
@@ -305,20 +379,29 @@ class ContiTui:
             (style, f" {self.state.status} "),
         ]
 
+    def _status_fragments(self) -> list[tuple[str, str]]:
+        return self._model_status_fragments()
+
     def _build_application(self) -> Application:
         header = Window(
             FormattedTextControl(self._header_fragments, show_cursor=False),
             height=1,
             style="class:header",
         )
-        status = Window(
-            FormattedTextControl(self._status_fragments, show_cursor=False),
+        model_status = Window(
+            FormattedTextControl(self._model_status_fragments, show_cursor=False),
             height=1,
             style="class:footer",
         )
-        root = HSplit([header, self.layout, status])
+        shortcuts = Window(
+            FormattedTextControl(self._shortcut_fragments, show_cursor=False),
+            height=1,
+            style="class:footer",
+        )
+        root = HSplit([header, self.layout, model_status, shortcuts])
+        layout = Layout(root, focused_element=self.input_control)
         return Application(
-            layout=Layout(root, focused_element=self.input_control),
+            layout=layout,
             key_bindings=self.key_bindings,
             full_screen=True,
             mouse_support=False,
@@ -364,75 +447,38 @@ class ContiTui:
         await self.run_prompt(prompt)
 
     async def handle_command(self, prompt: str) -> None:
-        command, *arguments = prompt.split(maxsplit=1)
-        lowered = command.lower()
-        if lowered in {"/exit", "/quit"}:
-            self.application.exit(result="exit")
-            return
-        if lowered == "/help":
-            self.state.add_system(
-                "\n".join([
-                    "命令：",
-                    "/new — 开启新会话",
-                    "/status — 显示运行时状态",
-                    "/sessions — 列出会话",
-                    "/resume <id> — 恢复会话",
-                    "/compact — 压缩当前会话",
-                    "/clear — 清除屏幕显示（不清除磁盘会话）",
-                    "/exit — 退出",
-                ])
-            )
-            self.state.status = "帮助已显示"
-            return
-        if lowered == "/clear":
-            self.state.messages.clear()
-            self.state.activity.clear()
-            self.state.add_system("屏幕显示已清除。")
-            self.state.status = "显示已清除"
-            return
-        if lowered == "/new":
+        context = self._command_context()
+        result = await self.command_registry.execute(prompt, context)
+
+        if result.new_session_requested:
             self.state.session_id = "新会话"
             self.state.usage = {"input_tokens": 0, "output_tokens": 0}
             self.state.tool_count = 0
             self.state.messages.clear()
-            self.state.add_system("已开启新会话。")
-            self.state.status = "新会话"
-            return
-        if lowered == "/status":
-            self.state.add_system("\n".join(
-                f"{key}: {value}" for key, value in self.state.runtime_info.items()
-            ))
-            self.state.status = "状态已刷新"
-            return
-        if lowered == "/sessions":
-            sessions = self.runtime.sessions.list()
-            if not sessions:
-                self.state.add_system("还没有保存的会话。")
-            else:
-                lines = [f"{item['session_id']}  {item['title']}" for item in sessions[-20:]]
-                self.state.add_system("最近会话：\n" + "\n".join(lines))
-            self.state.status = f"共 {len(sessions)} 个会话"
-            return
-        if lowered == "/resume":
-            session_id = arguments[0].strip() if arguments else ""
-            if not session_id:
-                self.state.add_system("用法：/resume <session-id>")
-                return
-            self.runtime.sessions.load(session_id)
-            self.state.session_id = session_id
-            self.state.add_system(f"已恢复会话 {session_id}")
-            self.state.status = "已恢复"
-            return
-        if lowered == "/compact":
-            if self.state.session_id in {"", "新会话"}:
-                self.state.add_system("当前还没有可压缩的磁盘会话。")
-                return
-            from .cli import compact_session
-            summary = await compact_session(self.runtime, str(self.state.session_id))
-            self.state.add_system(f"历史已压缩。摘要字数：{len(summary)}")
-            self.state.status = "历史已压缩"
-            return
-        self.state.add_system(f"未知命令：{command}")
+        elif result.session_id is not None:
+            self.state.session_id = result.session_id
+
+        if result.panel_action == "toggle":
+            self._toggle_panel()
+
+        if result.clear_requested:
+            self.state.messages.clear()
+            self.state.activity.clear()
+
+        # 模型或 /status 执行后刷新界面缓存。
+        self.state.runtime_info = self.runtime.describe()
+        self.state.status = result.output[0] if result.output else result.status
+
+        # clear 的输出要在清理后再显示；其余命令直接显示。
+        for line in result.output:
+            self.state.add_system(line)
+
+        if result.exit_requested:
+            self.application.exit(result="exit")
+
+    async def _compact_session(self, session_id: str) -> str:
+        from .cli import compact_session
+        return await compact_session(self.runtime, session_id)
 
     async def run_prompt(self, prompt: str) -> None:
         self.state.append_message("user", prompt)
@@ -480,6 +526,34 @@ class ContiTui:
 
     async def run_async(self) -> str:
         return await self.application.run_async()
+
+
+class CommandCompleter(Completer):
+    """为 Slash 命令和参数提供候选。"""
+
+    def __init__(self, interface: ContiTui) -> None:
+        self.interface = interface
+
+    def get_completions(self, document: Any, complete_event: Any) -> Any:
+        text = document.text_before_cursor
+        if not text.startswith("/"):
+            return
+        context = self.interface._command_context()
+        suggestions = self.interface.command_registry.suggest(text, context)
+        parts = text[1:].split(maxsplit=1)
+        if len(parts) == 1:
+            start = -len(parts[0])
+        elif parts[1] == "":
+            start = 0
+        else:
+            start = -len(parts[1])
+        for item in suggestions:
+            yield Completion(
+                item.value,
+                start_position=start,
+                display=item.value,
+                display_meta=item.description,
+            )
 
 
 def show_startup_logo() -> None:
