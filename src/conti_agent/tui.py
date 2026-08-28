@@ -19,11 +19,12 @@ from prompt_toolkit.layout import (
     ScrollablePane,
     VSplit,
     Window,
+    WindowAlign,
 )
 from prompt_toolkit.formatted_text.utils import split_lines
 from prompt_toolkit.layout.controls import UIContent, UIControl
 from prompt_toolkit.mouse_events import MouseEventType, MouseEvent
-from prompt_toolkit.widgets import Frame, TextArea
+from prompt_toolkit.widgets import TextArea
 from .activity import format_tool_completed, format_tool_started
 from .commands import CommandContext
 
@@ -377,7 +378,10 @@ class ScrollbarControl(UIControl):
             round(track * self.viewport.window_height / content),
         ))
         max_anchor = max(1, content - 1)
-        thumb_top = round(min(1.0, offset / max_anchor) * (track - thumb))
+        # 跟随模式必然贴底，滑块直接钉在轨道末端，避免逻辑行/显示行
+        # 单位差异导致贴底时滑块停在中途。
+        ratio = 1.0 if viewport.follow_bottom else min(1.0, offset / max_anchor)
+        thumb_top = round(ratio * (track - thumb))
         for row in range(track):
             if thumb_top <= row < thumb_top + thumb:
                 fragments.append(("class:scrollbar-thumb", "█\n"))
@@ -437,7 +441,7 @@ class ContiTui:
         self.input = input
         self.state = TuiState(runtime.describe())
         self.viewport = ViewportState()
-        self.sidebar_visible = False
+        self.sidebar_visible = True
         self.current_task: asyncio.Task | None = None
         self.command_registry = runtime.commands
         self.command_completer = CommandCompleter(self)
@@ -537,10 +541,12 @@ class ContiTui:
             always_hide_cursor=True,
             get_vertical_scroll=self._conversation_scroll,
         )
-        return Frame(
-            VSplit([body, ScrollbarWindow(self.viewport, body)]),
-            title="对话流",
-        )
+        return VSplit([
+            Window(width=1, char=" "),
+            body,
+            ScrollbarWindow(self.viewport, body),
+            Window(width=1, char=" "),
+        ])
 
     def _conversation_scroll(self, window: Any) -> int:
         """非折行模式的滚动回退；wrap 模式由 ConversationControl 游标锚点驱动。"""
@@ -553,23 +559,30 @@ class ContiTui:
         return max(0, min(viewport.scroll_offset, max_scroll))
 
     def _sidebar(self) -> Any:
-        control = Window(
+        content = Window(
             self.sidebar_control,
             wrap_lines=True,
             always_hide_cursor=True,
         )
-        return Frame(
-            ScrollablePane(control, display_arrows=False),
-            title="运行状态",
-            width=34,
-        )
+        return VSplit([
+            Window(width=1, char="▏", style="class:separator"),
+            ScrollablePane(content, display_arrows=False),
+        ], width=37)
+
+    def _input_area(self) -> Any:
+        return HSplit([
+            Window(height=1, char="─", style="class:separator"),
+            VSplit(
+                [Window(width=1, char=" "), self.input_control],
+                style="class:input-area",
+            ),
+        ])
 
     def _build_layout(self) -> Any:
         conversation = self._conversation()
-        input_frame = Frame(self.input_control, title="任务输入 — Enter 发送")
         left = HSplit([
                 conversation,
-                input_frame,
+                self._input_area(),
             ], height=Dimension(weight=1))
         children: list[Any] = [left]
         if self.sidebar_visible:
@@ -588,25 +601,22 @@ class ContiTui:
         return [
             ("class:status-key", f" {info.get('model', '-')} "),
             ("class:status-sep", "│"),
-            ("class:status-key", f" {info.get('permission_mode', '-')} "),
-            ("class:status-sep", "│"),
             ("class:status-key", f" {len(info.get('tools', []))} tools "),
             ("class:status-sep", "│"),
             (style, f" {self.state.status} "),
         ]
 
     def _shortcut_fragments(self) -> list[tuple[str, str]]:
-        style = "class:status-busy" if self.state.busy else "class:status-idle"
         return [
             ("class:status-key", " Enter 发送 "),
             ("class:status-sep", "│"),
             ("class:status-key", " Ctrl+C 取消 "),
             ("class:status-sep", "│"),
+            ("class:status-key", " Ctrl+B 面板 "),
+            ("class:status-sep", "│"),
             ("class:status-key", " Ctrl+Q 退出 "),
             ("class:status-sep", "│"),
-            ("class:status-key", " PageUp 翻页 "),
-            ("class:status-sep", "│"),
-            (style, f" {self.state.status} "),
+            ("class:status-key", " PageUp/PageDown 翻页 "),
         ]
 
     def _status_fragments(self) -> list[tuple[str, str]]:
@@ -632,16 +642,13 @@ class ContiTui:
             height=1,
             style="class:header",
         )
-        model_status = Window(
-            FormattedTextControl(self._model_status_fragments, show_cursor=False),
-            height=1,
-            style="class:footer",
-        )
-        shortcuts = Window(
-            FormattedTextControl(self._shortcut_fragments, show_cursor=False),
-            height=1,
-            style="class:footer",
-        )
+        footer = VSplit([
+            Window(FormattedTextControl(self._model_status_fragments)),
+            Window(
+                FormattedTextControl(self._shortcut_fragments),
+                align=WindowAlign.RIGHT,
+            ),
+        ])
         hint = Window(
             FormattedTextControl(self._too_small_fragments, show_cursor=False),
             style="class:muted",
@@ -649,8 +656,7 @@ class ContiTui:
         return HSplit([
             ConditionalContainer(header, filter=~too_small),
             ConditionalContainer(self.layout, filter=~too_small),
-            ConditionalContainer(model_status, filter=~too_small),
-            ConditionalContainer(shortcuts, filter=~too_small),
+            ConditionalContainer(footer, filter=~too_small),
             ConditionalContainer(hint, filter=too_small),
         ])
 
@@ -682,24 +688,24 @@ class ContiTui:
         return Style.from_dict({
             "header": "bg:#101820 #dbe7ee",
             "logo": "bg:#0ea5e9 #04121d bold",
-            "header-key": "#89ddff bold",
-            "header-sep": "#445767",
             "status-idle": "#7ee787 bold",
             "status-busy": "#ffbd2e bold",
             "user-heading": "#7dd3fc bold",
             "assistant-heading": "#c792ea bold",
             "system-heading": "#7ee787 bold",
             "streaming": "#ffbd2e",
-            "muted": "#748496",
+            "muted": "#5c6c7c",
+            "separator": "#22303c",
+            "input-area": "bg:#0b1218",
             "sidebar-heading": "#0ea5e9 bold",
             "key": "#8fa7b7",
             "activity": "#a5b6c3",
             "footer": "bg:#101820 #dbe7ee",
-            "status-key": "#89ddff bold",
-            "status-sep": "#445767",
-            "scrollbar-arrow": "#445767",
+            "status-key": "#89ddff",
+            "status-sep": "#33414d",
+            "scrollbar-arrow": "#33414d",
             "scrollbar-thumb": "#0ea5e9",
-            "scrollbar-track": "#33414d",
+            "scrollbar-track": "#1c2733",
         })
 
     def invalidate(self) -> None:
