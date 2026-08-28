@@ -9,10 +9,9 @@ from typing import Any
 
 Summarizer = Callable[[list[dict[str, Any]], str], str]
 
-# 压缩输出预留：给摘要生成留的安全边际（参考实际 p99 数据的保守值）。
-COMPACT_OUTPUT_RESERVE = 20_000
-# 当轮余量：压缩后到下次检查之间还要发的内容预留。
-ROUND_HEADROOM = 13_000
+# 压缩触发余量：max_output（答案写回同一窗口，必须预留）
+# + 窗口的 10%（增量估算误差与摘要生成期间的安全垫，随窗口等比缩放）。
+COMPACT_MARGIN_RATIO = 0.10
 # 自动压缩时保留的近期原文预算（token）。
 RECENT_KEEP_TOKENS = 10_000
 # 工具结果落盘阈值：单结果字符数 / 单轮累计字符数 / 上下文保留的预览长度。
@@ -126,9 +125,11 @@ class ContextManager:
         self.context_window = context_window
         self.max_output_tokens = max_output_tokens
         self.tool_schema_tokens = tool_schema_tokens
-        # 最近一次请求的精确用量（来自 provider 返回的 usage）。
+        # 最近一次请求的精确用量（来自 provider 返回的 usage），
+        # observed_count 是该精确值覆盖到的消息条数（之前的都算进去了）。
         self.last_input_tokens: int | None = None
         self.last_output_tokens: int | None = None
+        self.observed_count = 0
 
     @property
     def budget(self) -> int:
@@ -136,19 +137,30 @@ class ContextManager:
 
     @property
     def compaction_trigger(self) -> int:
-        """自动压缩触发点：窗口扣掉压缩输出预留和当轮余量。"""
-        return max(1000, self.context_window - COMPACT_OUTPUT_RESERVE - ROUND_HEADROOM)
+        """自动压缩触发点：窗口 − max_output（给答案留的格子）− 10% 窗口（估算安全垫）。"""
+        margin = self.max_output_tokens + int(self.context_window * COMPACT_MARGIN_RATIO)
+        return max(4096, self.context_window - margin)
 
-    def observe_usage(self, input_tokens: int, output_tokens: int) -> None:
+    def observe_usage(self, input_tokens: int, output_tokens: int,
+                      observed_count: int | None = None) -> None:
         self.last_input_tokens = input_tokens
         self.last_output_tokens = output_tokens
+        if observed_count is not None:
+            self.observed_count = observed_count
+
+    def invalidate_baseline(self) -> None:
+        """压缩后精确基线失效：退化为全量估算，下次响应后自动恢复。"""
+        self.last_input_tokens = None
+        self.last_output_tokens = None
+        self.observed_count = 0
 
     def projected_input_tokens(self, pending_messages: list[dict[str, Any]] | None = None) -> int:
         """预测下一次请求的输入规模：精确基数 + 待发送增量估算。"""
         if self.last_input_tokens is not None:
             base = self.last_input_tokens + (self.last_output_tokens or 0)
             return base + estimate_message_tokens(pending_messages or [])
-        return estimate_message_tokens(pending_messages or [])
+        # 无精确基线：全量估算；工具 schema 随每次请求发送，也要计入。
+        return estimate_message_tokens(pending_messages or []) + self.tool_schema_tokens
 
     def needs_compaction(self, messages: list[dict[str, Any]],
                          pending: list[dict[str, Any]] | None = None) -> bool:
@@ -157,7 +169,7 @@ class ContextManager:
             projected = (self.last_input_tokens + (self.last_output_tokens or 0)
                          + estimate_message_tokens(pending or []))
         else:
-            projected = estimate_message_tokens(messages)
+            projected = (estimate_message_tokens(messages) + self.tool_schema_tokens)
         return projected > self.compaction_trigger
 
     def plan(self, messages: list[dict[str, Any]], keep_recent: int = 8) -> ContextPlan:

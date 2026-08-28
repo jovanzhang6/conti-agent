@@ -249,12 +249,25 @@ class Runtime:
         self.sessions.append_message(session_id, user_message(prompt))
         messages.insert(0, {"role": "system", "content": self._system_prompt()})
         events: list[AgentEvent] = []
-        if self.context_manager.needs_compaction(messages, pending=[messages[-1]]):
-            if await self.compact_messages(messages, session_id, reason="auto"):
-                events.append(event("context.compacted", reason="auto"))
         context = ToolContext(workspace=self.workspace.root, session_id=session_id,
                               services={"skill_library": self.skill_library})
         self.result_spiller.reset_round()
+
+        def observe_usage(input_tokens: int, output_tokens: int,
+                          covered_count: int) -> None:
+            self.context_manager.observe_usage(input_tokens, output_tokens,
+                                               covered_count)
+
+        async def pre_request(pending_messages: list[dict[str, Any]], *,
+                              force: bool = False, reason: str = "auto") -> None:
+            """每次发请求前的统一检查点：投影超限（或强制）就压缩。"""
+            pending = pending_messages[self.context_manager.observed_count:]
+            if force or self.context_manager.needs_compaction(pending_messages,
+                                                              pending):
+                if await self.compact_messages(pending_messages, session_id,
+                                               reason=reason):
+                    events.append(event("context.compacted", reason=reason))
+
         final_text = ""
         for attempt in range(2):
             agent = Agent(
@@ -266,6 +279,8 @@ class Runtime:
                 session_id=session_id,
                 hook_engine=self.hook_engine,
                 result_spiller=self.result_spiller,
+                usage_observer=observe_usage,
+                pre_request_hook=pre_request,
             )
             try:
                 async for item in agent.run(messages):
@@ -329,6 +344,8 @@ class Runtime:
             "content": "[历史摘要]\n" + summary_text + ("\n" + extras if extras else ""),
         }
         messages[:] = [*prefix, summary_message, *tail]
+        # 历史被替换，精确基线失效；退化为估算，下次响应后自动恢复。
+        self.context_manager.invalidate_baseline()
         if session_id:
             self.sessions.append_compaction(session_id, summary_text, len(old),
                                             summary_message=summary_message)

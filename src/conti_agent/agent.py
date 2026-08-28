@@ -29,7 +29,8 @@ class Agent:
                  permission_checker: PermissionChecker | None = None,
                  auditor: AuditLogger | None = None,
                  session_store=None, session_id: str = "",
-                 hook_engine=None, result_spiller=None) -> None:
+                 hook_engine=None, result_spiller=None,
+                 usage_observer=None, pre_request_hook=None) -> None:
         self.provider = provider
         self.registry = registry
         self.context = context
@@ -40,6 +41,10 @@ class Agent:
         self.session_id = session_id
         self.hook_engine = hook_engine
         self.result_spiller = result_spiller
+        # 每次响应到达时同步记录精确用量与覆盖的消息条数。
+        self.usage_observer = usage_observer
+        # 每次向模型发请求之前调用：做上下文投影检查，超限就压缩。
+        self.pre_request_hook = pre_request_hook
 
     async def _complete_with_retry(self, messages: list[dict[str, Any]],
                                    emit: Any) -> Any:
@@ -140,11 +145,21 @@ class Agent:
                        workspace=str(self.context.workspace)))
             try:
                 total_input = total_output = 0
+                length_retried = False
                 for iteration in range(1, self.config.max_tool_iterations + 1):
+                    if self.pre_request_hook is not None:
+                        await self.pre_request_hook(messages)
+                    sent_count = len(messages)
                     response = await self._complete_with_retry(messages, emit)
                     if response.usage:
                         total_input += response.usage.input_tokens
                         total_output += response.usage.output_tokens
+                        if self.usage_observer is not None:
+                            self.usage_observer(
+                                response.usage.input_tokens,
+                                response.usage.output_tokens,
+                                sent_count,
+                            )
                         emit(event("usage.recorded",
                                    input_tokens=response.usage.input_tokens,
                                    output_tokens=response.usage.output_tokens))
@@ -159,6 +174,16 @@ class Agent:
                                    for call in (response.tool_calls or [])
                                ]))
                     if not response.has_tool_calls:
+                        # 回复被窗口截断（finish_reason=length）：丢弃残缺回复，
+                        # 强制压缩后重新生成一次。截断不报错，必须主动检测。
+                        if (response.stop_reason == "length" and not length_retried
+                                and self.pre_request_hook is not None):
+                            length_retried = True
+                            messages.pop()
+                            emit(event("context.compacted", reason="truncated"))
+                            await self.pre_request_hook(messages, force=True,
+                                                        reason="truncated")
+                            continue
                         emit(event("run.completed", iterations=iteration,
                                    stop_reason=response.stop_reason,
                                    duration=time.monotonic() - started,

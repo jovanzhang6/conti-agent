@@ -250,11 +250,11 @@ permission_mode = "workspace"
         self.assertEqual(estimate_tokens(""), 0)
 
     def test_compaction_trigger_and_usage_projection(self) -> None:
-        manager = ContextManager(context_window=200_000, max_output_tokens=2048)
-        # 触发点 = 窗口 - 20K 压缩输出预留 - 13K 当轮余量。
-        self.assertEqual(manager.compaction_trigger, 167_000)
+        manager = ContextManager(context_window=200_000, max_output_tokens=8_192)
+        # 触发点 = 窗口 − max_output（答案预留）− 10% 窗口（估算安全垫）。
+        self.assertEqual(manager.compaction_trigger, 171_808)
         self.assertTrue(
-            manager.needs_compaction([{"role": "user", "content": "测" * 168_000}])
+            manager.needs_compaction([{"role": "user", "content": "测" * 172_000}])
         )
         self.assertFalse(manager.needs_compaction([{"role": "user", "content": "hi"}]))
         # 精确基数（上次 usage）+ 待发送增量估算（含消息键值与条目开销）。
@@ -263,6 +263,27 @@ permission_mode = "workspace"
             manager.projected_input_tokens([{"role": "user", "content": "测" * 100}]),
             105_108,
         )
+
+    def test_usage_baseline_schema_and_invalidation(self) -> None:
+        manager = ContextManager(context_window=32_000, max_output_tokens=2_048,
+                                 tool_schema_tokens=500)
+        self.assertEqual(manager.compaction_trigger, 32_000 - 2_048 - 3_200)
+        body = [{"role": "user", "content": "测" * 26_600}]
+        # 无精确基线时，全量估算必须把工具 schema 也计入。
+        self.assertTrue(manager.needs_compaction(body))
+        manager.tool_schema_tokens = 0
+        self.assertFalse(manager.needs_compaction(body))
+        # 精确基线覆盖数：投影只估算覆盖数之后的新增消息。
+        manager.tool_schema_tokens = 500
+        manager.observe_usage(10_000, 1_000, observed_count=2)
+        self.assertEqual(
+            manager.projected_input_tokens([{"role": "user", "content": "x" * 40}]),
+            11_018,
+        )
+        # 压缩后基线失效。
+        manager.invalidate_baseline()
+        self.assertIsNone(manager.last_input_tokens)
+        self.assertEqual(manager.observed_count, 0)
 
     def test_split_for_compaction_preserves_tool_pairing(self) -> None:
         manager = ContextManager(context_window=200_000)
