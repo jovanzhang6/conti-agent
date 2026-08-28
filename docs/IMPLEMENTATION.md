@@ -680,6 +680,9 @@ python -m conti_agent.cli --config .conti/config.toml chat
 5. resize 后重建；
 6. 小窗口降级到行式模式或提示页。
 
+这是下一步优先任务。完整交接上下文、实现方案和验收标准见
+[`docs/HANDOFF_WP11_TUI_HISTORY_SCROLL.md`](HANDOFF_WP11_TUI_HISTORY_SCROLL.md)。
+
 ### WP-11D：信息架构重构
 
 改动点：
