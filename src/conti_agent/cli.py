@@ -102,6 +102,23 @@ async def run_chat(runtime: Runtime, session_id: str | None,
         output_function("")
 
 
+async def run_tui(runtime: Runtime) -> None:
+    """启动独立设计的全屏终端界面。"""
+    try:
+        from .tui import ContiTui, show_startup_logo
+    except ImportError as exc:
+        raise ContiAgentError(
+            "TUI 需要 prompt-toolkit。请执行：pip install -e .[tui]"
+        ) from exc
+    show_startup_logo()
+    interface = ContiTui(runtime)
+    try:
+        await interface.run_async()
+    finally:
+        # alternate screen 退出后会还原进入前的启动画面，这里清除残留。
+        print("\033[2J\033[H", end="", flush=True)
+
+
 async def compact_session(runtime: Runtime, session_id: str) -> str:
     _, messages = runtime.sessions.load(session_id)
     compacted, summary, count = runtime.context_manager.compact(
@@ -146,7 +163,9 @@ async def run_cli(argv: list[str] | None = None, *,
     ask_parser.add_argument("prompt")
     ask_parser.add_argument("--session")
     ask_parser.add_argument("--event-format", choices=["text", "jsonl"], default="text")
-    subparsers.add_parser("chat", help="启动行式交互会话")
+    chat_parser = subparsers.add_parser("chat", help="启动终端 TUI 对话")
+    chat_parser.add_argument("--line", action="store_true", help="使用兼容行式界面")
+    chat_parser.add_argument("--tui", action="store_true", help="强制使用全屏 TUI")
     subparsers.add_parser("sessions", help="列出保存的会话")
     subparsers.add_parser("config-check", help="校验配置")
     worker_parser = subparsers.add_parser("worker", help="执行本地协作任务")
@@ -178,8 +197,12 @@ async def run_cli(argv: list[str] | None = None, *,
                 output(final)
             return 0
         if args.command == "chat":
-            await run_chat(runtime, None, input_function or (lambda prompt: input(prompt)),
-                           output)
+            if args.tui or (not args.line and sys.stdout.isatty()):
+                await run_tui(runtime)
+            else:
+                await run_chat(runtime, None,
+                               input_function or (lambda prompt: input(prompt)),
+                               output)
             return 0
         if args.command == "sessions":
             for item in runtime.sessions.list():

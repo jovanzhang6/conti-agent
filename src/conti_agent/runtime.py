@@ -126,7 +126,8 @@ class Runtime:
 
     async def ask(self, prompt: str, *, session_id: str | None = None,
                   output_format: str = "text",
-                  text_callback: Callable[[str], None] | None = None) -> tuple[str, str, AsyncIterator[AgentEvent] | list[AgentEvent]]:
+                  text_callback: Callable[[str], None] | None = None,
+                  event_callback: Callable[[AgentEvent], None] | None = None) -> tuple[str, str, AsyncIterator[AgentEvent] | list[AgentEvent]]:
         """执行一次任务；返回 final_text、session_id 和事件集合。"""
         created = False
         if session_id is None:
@@ -163,6 +164,8 @@ class Runtime:
                 self.output_function(item.to_json())
             if item.type == "text.delta" and text_callback and item.payload.get("text"):
                 text_callback(str(item.payload["text"]))
+            if event_callback:
+                event_callback(item)
             events.append(item)
             if item.type == "message.created" and item.payload.get("text"):
                 final_text = str(item.payload["text"])
