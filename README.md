@@ -82,9 +82,17 @@ export CONTI_AGENT_E2E_API_KEY="你的真实 API Key"
 python -m conti_agent.cli --config .conti/config.toml chat
 ```
 
-界面先显示自有 `CONTI` ASCII 启动图，然后进入全屏工作台：
+界面先显示独立设计的 `CONTI` ASCII 启动图，然后进入全屏工作台：
 
 ```text
+  ____  ____  _   _  _____ _    ___
+ / ___|/ ___|| \ | ||_   _| |  / _ \
+| |    | |   |  \| |  | |  | | | | | |
+| |___ | |___| |\  |  | |  | |_| |_| |
+ \____| \____|_| \_|  |_|   \___/\___/
+
+   C O N T I  //  A G E N T   T U I
+
 CONTI-AGENT | deepseek-v4-flash | workspace | 准备就绪
 对话流                        │ 运行状态
 任务输入 — Enter 发送         │ tokens / activity
