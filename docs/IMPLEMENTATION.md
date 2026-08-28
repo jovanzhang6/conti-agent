@@ -14,6 +14,7 @@
 | WP-05 Runtime 与终端对话 | 已完成 | 真实流式 `chat`、状态栏、会话命令 |
 | WP-06 真实模型闭环 | 已完成 | 一次性、多轮、工具、Hook、外部工具 |
 | WP-07 发布工程 | 进行中 | 文档一致性、发布检查、tag 移动 |
+| WP-09 独立全屏 TUI | 已完成 | 自有 ASCII 启动图、三栏工作台、流式对话 |
 | WP-08 后续能力 | 未开始 | 记忆检索、Anthropic 流式、服务鉴权、OS 沙箱 |
 
 ## WP-00：独立仓库与规格
@@ -416,6 +417,133 @@ git grep -nE "sk-[A-Za-z0-9]{16,}" -- .
 2. tag 必须移动到最新发布验收提交；
 3. 下一能力开发应从 `v0.1.1-dev` 或 `v0.2.0-dev` 开始，而不是继续修改已发布语义。
 
+## WP-09：独立全屏 TUI
+
+### 结论修正
+
+早期把“风格不能一样”误解为“不做 TUI”。正确目标是：不做继承式视觉，但必须做一个全新的、更好用的自有 TUI。`conti-agent chat` 在真实终端默认进入全屏 TUI；`chat --line` 仅作为管道和无 TTY 的兼容模式。
+
+### 改动点
+
+1. `pyproject.toml`
+   - 新增 optional dependency：
+     ```toml
+     tui = ["prompt-toolkit>=3.0,<4"]
+     ```
+   - `all` 包含 `tui`；
+   - 核心 runtime 仍保持零第三方依赖。
+2. `src/conti_agent/tui.py` 新建。
+   - `STARTUP_LOGO`：自有 `CONTI` ASCII 启动图；
+   - `show_startup_logo()`：清屏、显示启动图、进入 alternate screen；
+   - `TuiState`：纯状态层，保存 messages、activity、status、session、usage、tool count 和 error count；
+   - `TuiState.stream_delta()` 实时聚合 AI 文本；
+   - `TuiState.record_event()` 处理工具请求、完成、重试、失败和用量；
+   - `ContiTui`：prompt_toolkit full-screen `Application`；
+   - Header：品牌、模型、权限、工具数、运行状态；
+   - 左侧：可滚动对话流和任务输入框；
+   - 右侧：状态/活动栏；
+   - Footer：快捷键和状态；
+   - Enter 发送；
+   - Ctrl+C 只取消当前任务；
+   - Ctrl+Q 取消任务并退出。
+3. `src/conti_agent/runtime.py`
+   - `Runtime.ask()` 新增 `event_callback`；
+   - `text.delta` 走 `text_callback`；
+   - 所有事件额外交给 TUI 活动栏；
+   - usage 事件更新 sidebar。
+4. `src/conti_agent/cli.py`
+   - `chat --tui` 强制 TUI；
+   - `chat --line` 强制行式；
+   - 真实 TTY 下默认 TUI；
+   - 无 TTY 或 `--line` 时使用原行式界面；
+   - 缺少 `prompt-toolkit` 时给出明确安装命令。
+5. `tests/test_tui.py` 新建。
+   - 校验启动图；
+   - 校验流式占位、聚合、结束替换；
+   - 校验工具、用量、活动事件；
+   - 校验 `/help`、`/sessions`；
+   - 用 DummyOutput / DummyInput 构造 Application，不要求测试进程有 TTY。
+
+### 与旧 TUI 要求的边界
+
+1. 不使用任何继承项目的样式、配色、Logo 或布局；
+2. 不把 Logo 做成普通一行文字；
+3. 不把流式输出混在输入行里；
+4. 不让工具活动刷掉用户输入；
+5. 不把取消误绑定成退出。
+
+### 验收
+
+```bash
+pip install -e .[tui]
+python -m unittest discover -s tests
+python -m conti_agent.cli --config .conti/config.toml chat
+```
+
+自动化预期 44 个测试全部通过。手动必须看到：
+
+1. 自有 `CONTI` ASCII 启动图；
+2. 全屏三栏工作台；
+3. Header 显示 provider/model/权限/状态；
+4. 对话流出现用户和助手消息；
+5. AI 输出有 streaming 标记；
+6. 工具活动进入右侧栏；
+7. token 用量累加；
+8. `/help`、`/status`、`/sessions` 可用；
+9. `Ctrl+C` 取消但留在界面；
+10. `Ctrl+Q` 退出并恢复正常终端。
+
+### 已知限制
+
+1. 当前对话 pane 提供滚动视图，但尚未做完整视觉选择/复制模式；
+2. `/resume` 恢复后先从新事件继续显示，历史消息回填属于 WP-09A；
+3. TUI 依赖 `prompt-toolkit`，但它是显式 extra，不是核心 Runtime 的强制依赖。
+
+### WP-09A：TUI 历史回填
+
+改动点：
+
+1. `TuiState.load_session()`；
+2. `SessionStore.load()` 后把 user/assistant/tool 消息映射成界面消息；
+3. 工具消息进入 activity 而不是对话正文；
+4. `/resume` 后显示“历史回填完成”。
+
+### WP-09B：TUI 会话列表选择器
+
+改动点：
+
+1. 增加会话列表面板；
+2. 支持上下选择；
+3. Enter 确认恢复；
+4. Esc 返回对话。
+
+### WP-09C：TUI 权限审批弹窗
+
+改动点：
+
+1. approved 模式触发时暂停任务；
+2. 显示工具名、参数摘要、风险原因；
+3. `y/n` 或 Tab 切换；
+4. 决定写回 `PermissionChecker` 批准回调。
+
+### WP-09D：TUI 主题系统
+
+改动点：
+
+1. 配置新增 `[tui] theme`；
+2. 内置 `dark`、`light`、`mono`；
+3. 样式从硬编码字典迁移到主题对象；
+4. 文档给出颜色示例。
+
+### WP-09E：TUI 压力测试
+
+改动点：
+
+1. 生成 1000 条消息和 100 个工具事件；
+2. 限制对话 pane 只保留必要 fragments；
+3. 测量 60 秒流式刷新 CPU；
+4. 验证窗口 resize。
+
 ## WP-08：后续能力工作包
 
 这些不属于本次 `v0.1.0` 必须发布项，但必须按工作包推进。
@@ -525,9 +653,11 @@ git grep -nE "sk-[A-Za-z0-9]{16,}" -- .
 ## 当前验收快照
 
 ```text
-自动化测试：40 passed
+自动化测试：44 passed
 真实 ask：passed
 真实 chat：passed
+TUI module/Application：passed
+TUI startup ASCII：passed
 workspace_read：passed
 workspace_write：passed
 hook allow：passed

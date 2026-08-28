@@ -4,7 +4,7 @@
 
 `conti-agent` 是一个独立、可嵌入、可学习的 Python coding-agent 运行时。它把兼容 OpenAI 或 Anthropic Messages 协议的模型接入本地工作区，并用统一权限层控制所有副作用。
 
-第一公民体验是 `chat` 终端对话界面：用户进入终端后连续输入任务，助手输出流式回答。这是由 Runtime 事件驱动的独立行式界面，不使用第三方 TUI 框架，也不是全屏富界面。
+第一公民体验是 `chat` 全屏终端 TUI：用户进入终端后连续输入任务，助手输出流式回答。TUI 使用本项目自己的视觉设计，不复制任何既有项目的 Logo、布局或配色。核心 Runtime 不依赖第三方包，TUI 可通过 `prompt-toolkit` extra 安装。
 
 设计原则：
 
@@ -30,15 +30,33 @@ conti-agent --config .conti/config.toml ask "检查项目" --event-format jsonl
 - 成功返回 `0`，配置或输入错误返回 `2`，运行失败返回 `3`；
 - CLI、REPL 和 HTTP 共用 Runtime 门面。
 
-### 2.2 终端对话界面
+### 2.2 全屏终端 TUI
 
 ```bash
 conti-agent chat
 ```
 
-启动后必须显示当前 provider、model、权限模式、工作区和可用命令。助手输出必须真实流式；Provider 不支持流式时回显完整结果。
+`chat` 在真实终端中默认启动全屏 TUI；`chat --line` 保留兼容行式界面，便于管道、容器和无 TTY 环境。
 
-支持 `/help`、`/new`、`/status`、`/sessions`、`/resume <id>`、`/compact`、`/exit` 和行尾反斜杠续行。界面只负责输入输出，不拥有运行时策略。
+启动流程：
+
+1. 显示独立设计的 `CONTI` ASCII 启动图；
+2. 初始化 Runtime、工具和外部工具服务；
+3. 进入 alternate screen；
+4. 显示三栏工作台。
+
+TUI 必须包含 Header、对话流、活动侧栏、任务输入区和 Footer。对话流显示用户、助手、系统消息和流式标记；活动侧栏显示 provider/model/权限/工作区、会话、工具数、token 用量、错误数和工具活动。
+
+交互要求：
+
+1. `Enter` 发送任务；
+2. 流式回答实时写入对话流并显示 streaming 标记；
+3. 工具请求、工具完成、重试和用量进入活动栏；
+4. `Ctrl+C` 取消当前任务，不退出界面；
+5. `Ctrl+Q` 退出；
+6. 会话命令可直接在输入框执行。
+
+支持 `/help`、`/new`、`/status`、`/sessions`、`/resume <id>`、`/compact`、`/clear`、`/exit`。行式界面仍支持行尾反斜杠续行。界面只负责输入输出，不拥有运行时策略。
 
 ### 2.3 本地服务
 
@@ -242,10 +260,9 @@ Hook 超时、非零退出码和无效 JSON 默认导致拒绝。Hook 只能拒�
 
 - 不做遥测；
 - 不做自动权限提升；
-- 不做图形化终端界面；
 - 不内置 Logo 或品牌视觉；
 - 不主动安装或执行远程代码；
-- 不要求第三方运行时依赖。
+- 核心运行时不要求第三方依赖；全屏 TUI 通过 `prompt-toolkit` extra 提供。
 
 ## 15. v0.1.0 发布门槛
 
@@ -253,9 +270,13 @@ Hook 超时、非零退出码和无效 JSON 默认导致拒绝。Hook 只能拒�
 
 1. 真实 OpenAI-compatible 模型一次性调用成功；
 2. 真实模型进入 `chat` 后连续多轮对话成功；
-3. 真实模型调用 `workspace_read` 或 `workspace_write` 成功；
-4. 前置 Hook 能拒绝写入并让目标文件保持不存在；
-5. 外部 `namespace.tool` 能从 JSON-RPC 子进程加载并被模型调用；
-6. 密钥只出现在环境变量，不出现在源码、配置示例、会话或审计文件；
-7. `python -m unittest discover -s tests` 全部通过；
-8. 退出 CLI 后没有子进程或管道资源泄漏警告。
+3. `chat` 默认进入全屏 TUI，并显示独立 ASCII 启动图；
+4. TUI 对话流实时显示流式文本；
+5. TUI 活动栏显示工具请求、完成、重试和用量；
+6. 真实模型调用 `workspace_read` 或 `workspace_write` 成功；
+7. 前置 Hook 能拒绝写入并让目标文件保持不存在；
+8. 外部 `namespace.tool` 能从 JSON-RPC 子进程加载并被模型调用；
+9. 密钥只出现在环境变量，不出现在源码、配置示例、会话或审计文件；
+10. `python -m unittest discover -s tests` 全部通过；
+11. `chat --line` 在无 TTY 环境仍可用；
+12. 退出 TUI 后终端状态恢复，没有子进程或管道资源泄漏警告。

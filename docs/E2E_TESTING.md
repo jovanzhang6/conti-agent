@@ -1,22 +1,28 @@
 # conti-agent 真实端到端测试
 
-这份文档只做一件事：让你在真实终端中进入对话界面，用真实模型连续对话，并验证 AI 能安全地操作本地工作区。
+这份文档只做一件事：让你进入独立全屏 TUI，用真实模型连续对话，并验证 AI 能安全地操作本地工作区。
 
-自动化测试是开发者的回归检查；端到端的验收标准是下面这个画面：
+自动化测试是开发者的回归检查；端到端验收先看 TUI 启动图和工作台。
+
+启动时应先看到：
 
 ```text
-conti-agent 终端对话
-模型：deepseek / deepseek-v4-flash
-权限：workspace    工作区：...
-直接输入任务；/help 查看命令，/exit 退出。
-你 >
+  ____ _____ ____  _____ ____  ___
+ / ___|_   _|  _ \| ____|  _ \ / _ \
+| |     | | | |_) |  _| | |_) | | | |
+| |___  | | |  _ <| |___|  _ <| |_| |
+ \____| |_| |_| \_\_____|_| \_\\___/
+
+CONTI-AGENT TUI
 ```
 
-你输入任务后，应看到：
+进入工作台后应看到：
 
 ```text
-助手：
-模型流式返回的回答......
+CONTI-AGENT | deepseek-v4-flash | workspace | 准备就绪
+对话流                      │ 运行状态
+任务输入 — Enter 发送        │ provider/model
+Enter 发送 │ Ctrl+C 取消 ... │ tokens/activity
 ```
 
 不要用固定假的 `fake provider ready` 作为最终验收。它只能证明进程没坏，不能证明真实 AI 对话可用。
@@ -30,7 +36,7 @@ conti-agent 终端对话
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\activate
-pip install -e .
+pip install -e .[tui]
 ```
 
 类 Unix：
@@ -38,7 +44,7 @@ pip install -e .
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e .[tui]
 ```
 
 ### 0.2 准备 API Key
@@ -103,9 +109,9 @@ python -m conti_agent.cli --config ./.conti/config.toml config-check
 配置有效
 ```
 
-## 1. 必测一：进入终端并真实对话
+## 1. 必测一：进入全屏 TUI 并真实对话
 
-这是最终验收入口。
+这是最终验收入口。必须在真实终端窗口执行，例如 Windows Terminal、iTerm2、GNOME Terminal、Alacritty 或 WezTerm；不要通过普通管道执行。
 
 ```bash
 python -m conti_agent.cli --config .conti/config.toml chat
@@ -128,15 +134,44 @@ python -m conti_agent.cli --config .\.conti\config.toml chat
 
 通过标准：
 
-1. 启动后显示 provider、model、权限和工作区；
-2. 出现 `你 >`；
-3. 助手输出带 `助手：` 标签；
-4. 回答是流式输出；
-5. 第二轮模型能回复 `收到`；
-6. 第三轮模型能说出 `blue-lantern`；
-7. `/exit` 正常退出；
-8. 没有 traceback；
-9. 没有 API Key 泄漏。
+1. 先显示自有 `CONTI` ASCII 启动图；
+2. 随后进入全屏 alternate screen；
+3. Header 显示 `CONTI-AGENT`、model、workspace 权限和状态；
+4. 对话流、任务输入、运行状态侧栏和 Footer 同时可见；
+5. 助手输出有实时流式文本和 streaming 标记；
+6. 第二轮模型能回复 `收到`；
+7. 第三轮模型能说出 `blue-lantern`；
+8. 右侧 activity 能看到工具或 usage 活动；
+9. `/status` 显示 provider/model/protocol/权限/工作区；
+10. `/exit` 或 `Ctrl+Q` 退出后终端恢复正常；
+11. 没有 traceback；
+12. 没有 API Key 泄漏。
+
+TUI 内可直接执行：
+
+```text
+/help
+/status
+/sessions
+```
+
+`/status` 必须显示：
+
+```text
+provider: deepseek
+model: deepseek-v4-flash
+protocol: openai-compat
+permission_mode: workspace
+workspace: ...
+```
+
+如果需要临时使用旧兼容模式：
+
+```bash
+python -m conti_agent.cli --config .conti/config.toml chat --line
+```
+
+`--line` 用于无 TTY、CI 或极简终端，不能替代 TUI 端到端验收。
 
 记录会话 ID：
 
@@ -403,7 +438,7 @@ git grep -nE "sk-[A-Za-z0-9]{16,}" -- .
 
 通过标准：
 
-1. 全部测试通过；
+1. 全部测试通过，当前至少 44 个；
 2. 没有密钥格式命中；
 3. `git status --short` 干净。
 
@@ -418,18 +453,25 @@ commit：
 权限模式：
 测试目录：
 
-1. chat 流式多轮：passed / failed
-2. ask：passed / failed
-3. workspace_read：passed / failed
-4. workspace_write：passed / failed
-5. read_only deny：passed / failed
-6. hook deny：passed / failed
-7. external tool：passed / failed
-8. dangerous command deny：passed / failed
-9. JSONL events：passed / failed
-10. config error exit code：passed / failed
-11. unittest：passed / failed
-12. secret scan：passed / failed
+1. TUI startup ASCII：passed / failed
+2. TUI full-screen layout：passed / failed
+3. TUI streaming：passed / failed
+4. TUI sidebar activity：passed / failed
+5. TUI commands：passed / failed
+6. TUI Ctrl+C cancel：passed / failed
+7. TUI Ctrl+Q exit：passed / failed
+8. chat streaming multi-turn：passed / failed
+9. ask：passed / failed
+10. workspace_read：passed / failed
+11. workspace_write：passed / failed
+12. read_only deny：passed / failed
+13. hook deny：passed / failed
+14. external tool：passed / failed
+15. dangerous command deny：passed / failed
+16. JSONL events：passed / failed
+17. config error exit code：passed / failed
+18. unittest：passed / failed
+19. secret scan：passed / failed
 ```
 
 失败时补充：
@@ -451,3 +493,5 @@ commit：
 3. Anthropic-compatible 已能非流式对话，但流式仍属 WP-08A。
 4. `process_run` 是应用级控制，不是完整 OS 级沙箱；OS 沙箱计划在 WP-08E。
 5. `serve` 只绑定 loopback，尚未实现 token 鉴权；鉴权计划在 WP-08F。
+6. TUI `/resume` 已能切换会话，但历史消息回填计划在 WP-09A。
+7. TUI 依赖 `prompt-toolkit` extra；`chat --line` 可在未安装该 extra 或无 TTY 时使用。

@@ -2,7 +2,7 @@
 
 ## 版本判定
 
-`v0.1.0` 只有在真实模型端到端通过后才能发布。仅文档提交、fake provider 冒烟或单元测试通过，都不能作为发布依据。
+`v0.1.0` 只有在真实模型 TUI 端到端通过后才能发布。仅文档提交、fake provider 冒烟、行式 REPL 或单元测试通过，都不能作为发布依据。
 
 发布 tag 必须指向包含真实模型闭环的提交。旧 tag 如果指向早期文档基线，应删除后重新指向最新验收提交。
 
@@ -56,23 +56,35 @@ git grep -nE "sk-[A-Za-z0-9]{16,}" -- .
 按 [`docs/E2E_TESTING.md`](E2E_TESTING.md) 完成：
 
 1. 真实模型 `ask`；
-2. 真实模型 `chat` 流式多轮；
-3. `workspace_read`；
-4. `workspace_write`；
-5. `read_only` 写入拒绝；
-6. Hook 拒绝；
-7. 外部 `docs.echo`；
-8. 危险命令拒绝；
-9. JSONL 事件；
-10. 配置错误退出码；
-11. CLI 退出无子进程泄漏警告。
+2. 真实模型 `chat` 默认进入全屏 TUI；
+3. 独立 `CONTI` ASCII 启动图；
+4. Header、对话流、输入区、活动侧栏、Footer 可见；
+5. TUI 流式回答和 streaming 标记；
+6. TUI 工具活动、token、错误计数；
+7. TUI `/help`、`/status`、`/sessions`；
+8. `Ctrl+C` 取消任务但留在 TUI；
+9. `Ctrl+Q` 退出并恢复终端；
+10. 真实模型流式多轮对话；
+11. `workspace_read`；
+12. `workspace_write`；
+13. `read_only` 写入拒绝；
+14. Hook 拒绝；
+15. 外部 `docs.echo`；
+16. 危险命令拒绝；
+17. JSONL 事件；
+18. 配置错误退出码；
+19. `chat --line` 无 TTY 兼容；
+20. CLI 退出无子进程泄漏警告。
 
 当前记录：
 
 ```text
-自动化测试：40 passed
+自动化测试：44 passed
 真实 ask：passed
 真实 chat：passed
+TUI startup ASCII：passed
+TUI module/Application：passed
+TUI event/state rendering：passed
 workspace_read：passed
 workspace_write：passed
 read_only deny：passed

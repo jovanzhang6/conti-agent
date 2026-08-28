@@ -7,14 +7,14 @@
 - 核心循环不依赖网络，可使用 `fake` Provider 离线运行；
 - 模型输出和工具活动使用同一套 JSONL 事件；
 - 配置、会话、审计、任务板都是普通本地文件；
-- 不要求第三方运行时依赖；
-- 提供行式 REPL，而不是图形化终端界面；
-- 没有 Logo、品牌视觉和继承的界面风格。
+- 核心 Runtime 不要求第三方依赖；
+- `chat` 默认进入独立设计的全屏 TUI；
+- 自有 `CONTI` ASCII 启动图，没有继承任何项目的界面风格。
 
 ## 功能总览
 
 - `ask`：一次性任务，可输出文本或 JSONL 事件；
-- `chat`：行式交互会话，支持恢复和压缩；
+- `chat`：全屏 TUI 对话，支持流式输出、会话、压缩和活动侧栏；
 - `sessions`：列出持久化会话；
 - `worker`：执行本地协作任务板中的任务；
 - `serve`：默认只绑定 `127.0.0.1` 的本地 HTTP 服务；
@@ -34,6 +34,13 @@ python -m venv .venv
 pip install -e .
 ```
 
+推荐安装 TUI extra：
+
+```bash
+pip install -e .[tui]
+```
+
+TUI 使用 `prompt-toolkit`；核心 Runtime 仍可单独使用。无 TTY 环境可用 `chat --line`。
 类 Unix 系统中激活脚本路径改为：
 
 ```bash
@@ -75,7 +82,16 @@ export CONTI_AGENT_E2E_API_KEY="你的真实 API Key"
 python -m conti_agent.cli --config .conti/config.toml chat
 ```
 
-界面会显示模型、权限和工作区。直接输入任务即可连续对话。
+界面先显示自有 `CONTI` ASCII 启动图，然后进入全屏工作台：
+
+```text
+CONTI-AGENT | deepseek-v4-flash | workspace | 准备就绪
+对话流                        │ 运行状态
+任务输入 — Enter 发送         │ tokens / activity
+Enter 发送 | Ctrl+C 取消 | Ctrl+Q 退出
+```
+
+直接输入任务即可连续对话。`Enter` 发送，`Ctrl+C` 取消当前任务，`Ctrl+Q` 退出。
 
 ### 2. 离线冒烟
 
@@ -193,7 +209,7 @@ python -m conti_agent.cli --config .conti/config.toml ask "你好"
 
 ## 开发与测试
 
-项目运行时零第三方依赖，测试使用标准库 `unittest`。
+核心 Runtime 零第三方依赖；全屏 TUI 使用 `prompt-toolkit` extra。测试使用标准库 `unittest`。
 
 ```bash
 python -m unittest discover -s tests
