@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from prompt_toolkit.application import Application
+from prompt_toolkit.cursor_shapes import CursorShape, SimpleCursorShapeConfig
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
@@ -44,6 +46,86 @@ class ChatMessage:
     text: str
     timestamp: float = field(default_factory=time.time)
     streaming: bool = False
+    render_cache: tuple[str, list[tuple[str, str]]] | None = field(
+        default=None, repr=False, compare=False
+    )
+
+
+_MD_INLINE = re.compile(r"(`[^`]+`|\*\*[^*\n]+?\*\*|\*[^*\n]+?\*)")
+
+
+def _inline_fragments(text: str) -> list[tuple[str, str]]:
+    """行内 Markdown：`代码`、**加粗**、*斜体*。"""
+    fragments: list[tuple[str, str]] = []
+    position = 0
+    for match in _MD_INLINE.finditer(text):
+        if match.start() > position:
+            fragments.append(("", text[position:match.start()]))
+        token = match.group(0)
+        if token.startswith("`"):
+            fragments.append(("class:md-code", token[1:-1]))
+        elif token.startswith("**"):
+            fragments.append(("class:md-bold", token[2:-2]))
+        else:
+            fragments.append(("class:md-italic", token[1:-1]))
+        position = match.end()
+    if position < len(text):
+        fragments.append(("", text[position:]))
+    return fragments or [("", "")]
+
+
+def _markdown_fragments(text: str) -> list[tuple[str, str]]:
+    """基础 Markdown 渲染：标题/加粗/行内代码/围栏代码/列表/引用/表格/分隔线。"""
+    fragments: list[tuple[str, str]] = []
+
+    def emit(style: str, content: str) -> None:
+        fragments.append((style, content))
+        fragments.append(("", "\n"))
+
+    in_code_block = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            emit("class:md-codeblock", "  " + line)
+            continue
+        if not stripped:
+            emit("", "")
+            continue
+        if stripped.startswith(">"):
+            emit("class:md-quote", stripped)
+            continue
+        if stripped.startswith("|") and stripped.endswith("|"):
+            cells = stripped.strip("|").split("|")
+            if all(re.fullmatch(r":?\s*-{2,}\s*:?", cell.strip()) for cell in cells):
+                emit("class:md-rule", "├" + "┬".join("─" * 6 for _ in cells) + "┤")
+                continue
+            row: list[tuple[str, str]] = []
+            for index, cell in enumerate(cells):
+                if index:
+                    row.append(("class:md-rule", " │ "))
+                row.extend(_inline_fragments(cell.strip()))
+            fragments.extend(row)
+            fragments.append(("", "\n"))
+            continue
+        if re.fullmatch(r"-{3,}|\*{3,}", stripped):
+            emit("class:md-rule", "─" * 24)
+            continue
+        heading = re.match(r"(#{1,6})\s+(.*)", stripped)
+        if heading:
+            emit("class:md-heading", heading.group(2))
+            continue
+        bullet = re.match(r"([-*+])\s+(.*)", stripped)
+        if bullet:
+            fragments.append(("class:md-bullet", "• "))
+            fragments.extend(_inline_fragments(bullet.group(2)))
+            fragments.append(("", "\n"))
+            continue
+        fragments.extend(_inline_fragments(line))
+        fragments.append(("", "\n"))
+    return fragments
 
 
 @dataclass
@@ -203,9 +285,17 @@ class TuiState:
             if message.streaming:
                 fragments.append(("class:streaming", "  ● STREAMING"))
             fragments.append(("", "\n"))
-            fragments.append(("", message.text or ("..." if message.streaming else "")))
-            if message.streaming:
-                fragments.append(("class:streaming", "▌"))
+            body_text = message.text or ("..." if message.streaming else "")
+            if message.role == "system" or not body_text:
+                fragments.append(("", body_text))
+                continue
+            cached = message.render_cache
+            if cached is not None and cached[0] == body_text:
+                fragments.extend(cached[1])
+            else:
+                rendered = _markdown_fragments(body_text)
+                message.render_cache = (body_text, rendered)
+                fragments.extend(rendered)
         return fragments
 
     def render_sidebar(self) -> list[tuple[str, str]]:
@@ -572,10 +662,11 @@ class ContiTui:
     def _input_area(self) -> Any:
         return HSplit([
             Window(height=1, char="─", style="class:separator"),
-            VSplit(
-                [Window(width=1, char=" "), self.input_control],
-                style="class:input-area",
-            ),
+            VSplit([
+                Window(width=1, char=" "),
+                Window(width=1, char="▍", style="class:input-accent"),
+                self.input_control,
+            ], style="class:input-area"),
         ])
 
     def _build_layout(self) -> Any:
@@ -678,6 +769,7 @@ class ContiTui:
             key_bindings=self.key_bindings,
             full_screen=True,
             mouse_support=True,
+            cursor=SimpleCursorShapeConfig(CursorShape.BLINKING_BEAM),
             style=self._style(),
             output=self.output,
             input=self.input,
@@ -696,16 +788,24 @@ class ContiTui:
             "streaming": "#ffbd2e",
             "muted": "#5c6c7c",
             "separator": "#22303c",
-            "input-area": "bg:#0b1218",
+            "input-area": "bg:#0d151d",
+            "input-accent": "#0ea5e9",
             "sidebar-heading": "#0ea5e9 bold",
             "key": "#8fa7b7",
             "activity": "#a5b6c3",
-            "footer": "bg:#101820 #dbe7ee",
             "status-key": "#89ddff",
             "status-sep": "#33414d",
             "scrollbar-arrow": "#33414d",
             "scrollbar-thumb": "#0ea5e9",
             "scrollbar-track": "#1c2733",
+            "md-heading": "#7dd3fc bold",
+            "md-bold": "#eef5fa bold",
+            "md-italic": "italic #b9c8d4",
+            "md-code": "#7ee787",
+            "md-codeblock": "#9fb4c4",
+            "md-bullet": "#0ea5e9 bold",
+            "md-quote": "italic #8fa7b7",
+            "md-rule": "#33414d",
         })
 
     def invalidate(self) -> None:

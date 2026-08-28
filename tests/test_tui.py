@@ -240,6 +240,43 @@ class TuiTestCase(unittest.TestCase):
         self.assertEqual(interface.state.session_id, "abc")
 
 
+    def test_markdown_rendering(self) -> None:
+        from conti_agent.tui import _markdown_fragments
+
+        fragments = _markdown_fragments(
+            "## 标题\n\n这是 **加粗** 和 `代码`。\n\n- 列表项\n"
+            "```python\nprint(1)\n```\n"
+        )
+        text = "".join(item[1] for item in fragments)
+        self.assertIn("标题", text)
+        self.assertIn("加粗", text)
+        self.assertIn("print(1)", text)
+        self.assertNotIn("##", text)
+        self.assertNotIn("**", text)
+        self.assertNotIn("`", text)
+        styles = [style for style, _ in fragments]
+        self.assertIn("class:md-heading", styles)
+        self.assertIn("class:md-bold", styles)
+        self.assertIn("class:md-code", styles)
+        self.assertIn("class:md-codeblock", styles)
+        self.assertIn("class:md-bullet", styles)
+
+    def test_conversation_uses_markdown_cache(self) -> None:
+        state = TuiState(FakeRuntime().describe())
+        message = state.append_message("assistant", "## 标题")
+        first = state.render_conversation()
+        message.text = "## 标题\n\n正文"
+        second = state.render_conversation()
+        self.assertIn("正文", "".join(item[1] for item in second))
+        # 相同内容命中缓存，片段对象复用。
+        message.text = message.text
+        third = state.render_conversation()
+        self.assertEqual(
+            [item for item in second if item[1] == "正文"],
+            [item for item in third if item[1] == "正文"],
+        )
+
+
 def asyncio_run(awaitable: Any) -> None:
     import asyncio
     asyncio.run(awaitable)
