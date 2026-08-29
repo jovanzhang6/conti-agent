@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -190,7 +191,6 @@ class TuiState:
     def __init__(self, runtime_info: dict[str, Any]) -> None:
         self.runtime_info = runtime_info
         self.messages: list[ChatMessage] = []
-        self.activity: list[str] = []
         self.status = "准备就绪"
         self.session_id = "新会话"
         self.usage = {"input_tokens": 0, "output_tokens": 0}
@@ -198,6 +198,7 @@ class TuiState:
         self.tool_count = 0
         self.error_count = 0
         self.pending_activities: dict[str, tuple[str, dict[str, Any]]] = {}
+        self.pending_activity_messages: dict[str, Any] = {}
         self.add_system(
             "输入任务后按 Enter 发送。/help 查看命令，Ctrl+C 取消当前任务，Ctrl+Q 退出。"
         )
@@ -211,10 +212,9 @@ class TuiState:
     def add_system(self, text: str) -> ChatMessage:
         return self.append_message("system", text)
 
-    def append_activity(self, text: str) -> None:
-        stamp = time.strftime("%H:%M:%S")
-        self.activity.append(f"{stamp} {text}")
-        self.activity = self.activity[-100:]
+    def append_tool_activity(self, text: str) -> ChatMessage:
+        """工具/系统活动行：直接进入主对话流（codex 风格）。"""
+        return self.append_message("activity", text)
 
     def stream_delta(self, text: str) -> None:
         assistant = next(
@@ -242,36 +242,41 @@ class TuiState:
             tool_name = str(payload.get("tool_name", ""))
             arguments = payload.get("arguments", {})
             self.pending_activities[call_id] = (tool_name, arguments)
-            self.append_activity(format_tool_started(tool_name, arguments))
+            message = self.append_tool_activity(
+                format_tool_started(tool_name, arguments)
+            )
+            self.pending_activity_messages[call_id] = message
         elif event_type == "tool.completed":
             call_id = str(payload.get("tool_call_id", ""))
             tool_name, arguments = self.pending_activities.pop(
                 call_id, (str(payload.get("tool_name", "")), {})
             )
             elapsed = payload.get("metadata", {}).get("elapsed")
-            state = "失败" if payload.get("is_error") else "完成"
-            if state == "失败":
-                summary = format_tool_completed(
-                    tool_name, arguments, is_error=True, elapsed=elapsed
-                )
+            summary = format_tool_completed(
+                tool_name, arguments,
+                is_error=bool(payload.get("is_error")), elapsed=elapsed,
+            )
+            mark = "✗ " if payload.get("is_error") else "✓ "
+            message = self.pending_activity_messages.pop(call_id, None)
+            if message is not None:
+                message.text = mark + summary
+                message.render_cache = None
             else:
-                summary = format_tool_completed(
-                    tool_name, arguments, is_error=False, elapsed=elapsed
-                )
-            self.append_activity(summary)
+                self.append_tool_activity(mark + summary)
         elif event_type == "usage.recorded":
             self.usage["input_tokens"] += int(payload.get("input_tokens", 0))
             self.usage["output_tokens"] += int(payload.get("output_tokens", 0))
         elif event_type == "run.retry":
-            self.append_activity(f"Provider 重试 {payload.get('attempt')}")
+            self.append_tool_activity(f"↻ Provider 重试 {payload.get('attempt')}")
         elif event_type == "context.compacted":
-            reason = str(payload.get("reason", ""))
-            note = "上下文超限" if reason == "overflow" else "上下文接近上限"
-            self.append_activity(f"{note}，已压缩早期历史为摘要")
+            note = ("上下文超限" if payload.get("reason") == "overflow"
+                    else "回复被截断" if payload.get("reason") == "truncated"
+                    else "上下文接近上限")
+            self.append_tool_activity(f"⚙ {note}，已压缩早期历史为摘要")
         elif event_type == "run.failed":
             self.error_count += 1
             self.status = "运行失败"
-            self.append_activity(f"失败：{payload.get('error')}")
+            self.add_system(f"任务失败：{payload.get('error')}")
 
     def render_conversation(self) -> list[tuple[str, str]]:
         fragments: list[tuple[str, str]] = []
@@ -279,7 +284,14 @@ class TuiState:
             return [("class:muted", "还没有对话。\n输入你的第一个任务。")]
         for index, message in enumerate(self.messages):
             if index:
-                fragments.append(("", "\n\n"))
+                # 活动行与相邻内容紧凑排列，不插空行。
+                gap = ("\n" if (message.role == "activity"
+                                or self.messages[index - 1].role == "activity")
+                       else "\n\n")
+                fragments.append(("", gap))
+            if message.role == "activity":
+                fragments.append(("class:activity", message.text))
+                continue
             icon, style = {
                 "user": ("▶ ", "class:user-heading"),
                 "assistant": ("◆ ", "class:assistant-heading"),
@@ -334,13 +346,6 @@ class TuiState:
         )))
         fragments.append(("class:key", "errors    "))
         fragments.append(("", f"{self.error_count}\n"))
-
-        fragments.append(("", "\n"))
-        heading("活动")
-        if not self.activity:
-            fragments.append(("class:muted", "暂无工具活动。\n"))
-        for item in reversed(self.activity[-14:]):
-            fragments.append(("class:activity", item + "\n"))
         return fragments
 
 
@@ -551,6 +556,8 @@ class ContiTui:
         self.command_context = self._command_context()
         self.layout = self._build_layout()
         self.application = self._build_application()
+        if self.output is None:
+            enable_blinking_cursor()
 
     def _command_context(self) -> CommandContext:
         session_id = None if self.state.session_id == "新会话" else self.state.session_id
@@ -558,20 +565,25 @@ class ContiTui:
             self.runtime,
             session_id=str(session_id) if session_id is not None else None,
             compact_session=self._compact_session,
-            activity_provider=lambda: list(self.state.activity),
+            activity_provider=lambda: [m.text for m in self.state.messages
+                                       if m.role == "activity"][-20:],
         )
 
     def _make_input(self) -> Any:
         kb = KeyBindings()
         self.key_bindings = kb
 
-        @kb.add("enter")
-        async def _send(event: Any) -> None:
+        async def _send_current() -> None:
             prompt = self.input_control.text.strip()
             if not prompt:
                 return
             self.input_control.text = ""
             await self.handle_prompt(prompt)
+
+        @kb.add("enter", eager=True)
+        async def _send(event: Any) -> None:
+            # 输入框未聚焦时的兜底发送；聚焦时由控件级绑定接管。
+            await _send_current()
 
         @kb.add("c-c")
         async def _cancel(event: Any) -> None:
@@ -620,13 +632,25 @@ class ContiTui:
         async def _to_bottom(event: Any) -> None:
             self.viewport.scroll_to_bottom()
 
-        return TextArea(
-            multiline=False,
+        input_kb = KeyBindings()
+        # 控件级绑定优先级最高：multiline 下 Enter 一定发送，Ctrl+J 换行。
+        @input_kb.add("enter", eager=True)
+        async def _send_from_input(event: Any) -> None:
+            await _send_current()
+
+        @input_kb.add("c-j")
+        async def _insert_newline(event: Any) -> None:
+            self.input_control.buffer.insert_text("\n")
+
+        input_area = TextArea(
+            multiline=True,
             wrap_lines=True,
             completer=self.command_completer,
             complete_while_typing=True,
             focus_on_click=True,
         )
+        input_area.control.key_bindings = input_kb
+        return input_area
 
     def _conversation(self) -> Any:
         body = ViewportWindow(
@@ -671,7 +695,7 @@ class ContiTui:
                 Window(width=1, char=" "),
                 Window(width=1, char="▍", style="class:input-accent"),
                 self.input_control,
-            ], style="class:input-area"),
+            ], height=3, style="class:input-area"),
         ])
 
     def _build_layout(self) -> Any:
@@ -694,10 +718,15 @@ class ContiTui:
     def _model_status_fragments(self) -> list[tuple[str, str]]:
         info = self.state.runtime_info
         style = "class:status-busy" if self.state.busy else "class:status-idle"
+        usage_style = ("class:status-busy"
+                       if self.runtime.context_usage_percent() >= 85
+                       else "class:status-key")
         return [
             ("class:status-key", f" {info.get('model', '-')} "),
             ("class:status-sep", "│"),
             ("class:status-key", f" {len(info.get('tools', []))} tools "),
+            ("class:status-sep", "│"),
+            (usage_style, f" 上下文 {self.runtime.context_usage_percent()}% "),
             ("class:status-sep", "│"),
             (style, f" {self.state.status} "),
         ]
@@ -844,7 +873,6 @@ class ContiTui:
 
         if result.clear_requested:
             self.state.messages.clear()
-            self.state.activity.clear()
 
         if result.data.get("history") is not None:
             self._backfill_history(result.data["history"])
@@ -874,7 +902,7 @@ class ContiTui:
                     self.state.append_message(str(role), str(content))
             elif role == "tool":
                 if content:
-                    self.state.append_activity(f"工具结果：{str(content)[:80]}")
+                    self.state.append_tool_activity(f"✓ 工具结果：{str(content)[:80]}")
             elif role == "system":
                 if content:
                     self.state.add_system(str(content))
@@ -930,7 +958,11 @@ class ContiTui:
         self.invalidate()
 
     async def run_async(self) -> str:
-        return await self.application.run_async()
+        try:
+            return await self.application.run_async()
+        finally:
+            if self.output is None:
+                reset_cursor_shape()
 
 
 class CommandCompleter(Completer):
@@ -969,4 +1001,33 @@ def show_startup_logo() -> None:
     print("\033[1;96m" + STARTUP_LOGO + "\033[0m")
     print("\033[90m  independent runtime · local workspace · explicit safety\033[0m")
     print("\033[90m  正在初始化界面...\033[0m", flush=True)
+
+
+def enable_blinking_cursor() -> None:
+    """Windows 下 prompt_toolkit 的输出类不实现光标形状（空操作），
+    直接发 DECSCUSR 请求“闪烁竖线”；仅在真实终端调用。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return
+        if not mode.value & 0x0004:  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+        sys.stdout.write("\x1b[5 q")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def reset_cursor_shape() -> None:
+    try:
+        if sys.platform == "win32":
+            sys.stdout.write("\x1b[0 q")
+            sys.stdout.flush()
+    except Exception:
+        pass
     time.sleep(0.8)

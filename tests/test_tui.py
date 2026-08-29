@@ -65,6 +65,9 @@ class FakeRuntime:
     def active_provider_name(self) -> str:
         return "active"
 
+    def context_usage_percent(self) -> int:
+        return 12
+
     def get_provider_info(self, name: str) -> dict[str, Any]:
         if name not in ("active", "other"):
             raise ValueError("unknown")
@@ -118,14 +121,20 @@ class TuiTestCase(unittest.TestCase):
 
     def test_event_counters_and_activity(self) -> None:
         state = TuiState(FakeRuntime().describe())
-        state.record_event(event("tool.requested", tool_name="workspace_read"))
+        state.record_event(event("tool.requested", tool_name="workspace_read",
+                                 tool_call_id="c1"))
         state.record_event(event("tool.completed", tool_name="workspace_read",
-                                 is_error=False))
+                                 tool_call_id="c1", is_error=False))
         state.record_event(event("usage.recorded", input_tokens=3,
                                  output_tokens=5))
         self.assertEqual(state.tool_count, 1)
         self.assertEqual(state.usage, {"input_tokens": 3, "output_tokens": 5})
-        self.assertEqual(len(state.activity), 2)
+        # 工具活动进入主对话流：请求行被完成行原位更新。
+        activity = [m for m in state.messages if m.role == "activity"]
+        self.assertEqual(len(activity), 1)
+        self.assertTrue(activity[0].text.startswith("✓"))
+        self.assertEqual([m.text for m in state.messages[-1:]],
+                         [activity[0].text])
 
     def test_commands_and_renderers(self) -> None:
         interface = ContiTui(
@@ -235,8 +244,9 @@ class TuiTestCase(unittest.TestCase):
         self.assertIn("user", roles)
         self.assertIn("assistant", roles)
         self.assertTrue(any("历史已回填" in item for item in texts))
-        # 工具消息只进入活动栏。
-        self.assertTrue(any("工具输出" in item for item in interface.state.activity))
+        # 工具消息进入主对话流的活动行。
+        self.assertTrue(any(m.role == "activity" and "工具结果" in m.text
+                            for m in interface.state.messages))
         self.assertEqual(interface.state.session_id, "abc")
 
 

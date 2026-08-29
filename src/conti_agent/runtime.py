@@ -224,6 +224,12 @@ class Runtime:
         _, messages = self.sessions.load(session_id)
         return messages
 
+    def context_usage_percent(self) -> int:
+        """当前上下文用量占窗口的百分比（有精确基线时为精确值）。"""
+        window = max(1, self.context_manager.context_window)
+        projected = self.context_manager.projected_input_tokens()
+        return min(100, round(100 * projected / window))
+
     async def ask(self, prompt: str, *, session_id: str | None = None,
                   output_format: str = "text",
                   text_callback: Callable[[str], None] | None = None,
