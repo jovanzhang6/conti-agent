@@ -281,9 +281,9 @@ class TuiState:
                     else "上下文接近上限")
             self.append_tool_activity(f"⚙ {note}，已压缩早期历史为摘要")
         elif event_type == "run.failed":
+            # 只更新状态与计数；错误详情由任务异常路径统一展示一次。
             self.error_count += 1
             self.status = "运行失败"
-            self.add_system(f"任务失败：{payload.get('error')}")
         elif event_type == "message.created":
             # 每轮模型文本到此定稿；下轮文本会另起新消息，
             # 保证工具活动行与对话保持真实时序。
