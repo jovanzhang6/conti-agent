@@ -35,8 +35,9 @@
 
 ### 1.2 四家生产级 agent 的策略调研
 
-参考实现：`D:\coding-agent\terminal-agent-references\` 下的 codex（OpenAI，
-Rust）、deepseek-harness（TS）、opencode（TS）、pi（TS）。
+参考实现：四个生产级终端 Agent 的开源代码库（OpenAI Codex CLI / Rust、
+deepseek-harness / TS、opencode / TS、pi / TS），逐一提取其压缩相关源码
+常量与执行流程。
 
 #### 触发时机与阈值
 
