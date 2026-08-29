@@ -387,6 +387,38 @@ class TuiTestCase(unittest.TestCase):
         asyncio_run(scenario())
 
 
+    def test_streaming_keeps_true_chronology(self) -> None:
+        """工具活动行与模型文本必须保持真实时序：
+        iter1 文本 → 工具活动 → iter2 文本各自定位正确。"""
+
+        async def scenario() -> None:
+            interface = ContiTui(FakeRuntime(), output=DummyOutput(),
+                                 input=DummyInput())
+            state = interface.state
+            state.messages.clear()
+            state.append_message("user", "读取两个文件，做一下测试")
+            interface._on_text_delta("我先看一下目录。")
+            state.record_event(event("message.created", text="我先看一下目录。"))
+            state.record_event(event("tool.requested", tool_name="workspace_list",
+                                     tool_call_id="c1"))
+            state.record_event(event("tool.completed", tool_name="workspace_list",
+                                     tool_call_id="c1", is_error=False))
+            state.record_event(event("tool.requested", tool_name="workspace_read",
+                                     tool_call_id="c2"))
+            state.record_event(event("tool.completed", tool_name="workspace_read",
+                                     tool_call_id="c2", is_error=False))
+            interface._on_text_delta("读取完成，总结如下。")
+            state.record_event(event("message.created", text="读取完成，总结如下。"))
+            self.assertEqual([m.role for m in state.messages],
+                             ["user", "assistant", "activity", "activity",
+                              "assistant"])
+            self.assertEqual(state.messages[1].text, "我先看一下目录。")
+            self.assertFalse(state.messages[1].streaming)
+            self.assertEqual(state.messages[4].text, "读取完成，总结如下。")
+
+        asyncio_run(scenario())
+
+
 def asyncio_run(awaitable: Any) -> None:
     import asyncio
     asyncio.run(awaitable)

@@ -281,6 +281,10 @@ class TuiState:
             self.error_count += 1
             self.status = "运行失败"
             self.add_system(f"任务失败：{payload.get('error')}")
+        elif event_type == "message.created":
+            # 每轮模型文本到此定稿；下轮文本会另起新消息，
+            # 保证工具活动行与对话保持真实时序。
+            self.finish_stream(str(payload.get("text") or ""))
 
     def render_conversation(self) -> list[tuple[str, str]]:
         fragments: list[tuple[str, str]] = []
@@ -979,8 +983,8 @@ class ContiTui:
 
     async def run_prompt(self, prompt: str) -> None:
         self.state.append_message("user", prompt)
-        self.state.append_message("assistant", streaming=True)
-        # 用户主动发送消息时回到跟随模式，确保看到最新回复。
+        # 不再预建占位消息：assistant 消息在实际开始输出时创建
+        # （stream_delta），保证与工具活动行保持真实时序。
         self.viewport.scroll_to_bottom()
         self.state.busy = True
         self.state.status = "AI 正在处理"
