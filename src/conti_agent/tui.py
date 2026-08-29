@@ -945,17 +945,19 @@ class CommandCompleter(Completer):
         context = self.interface._command_context()
         suggestions = self.interface.command_registry.suggest(text, context)
         parts = text[1:].split(maxsplit=1)
-        if len(parts) == 1:
-            start = -len(parts[0])
-        elif parts[1] == "":
-            start = 0
-        else:
-            start = -len(parts[1])
         for item in suggestions:
+            value = item.value
+            if value.startswith("/"):
+                # 命令候选自带斜杠：从输入起点整体替换，避免出现 "//"。
+                start = -len(text)
+            elif not parts or parts[-1] == "":
+                start = 0
+            else:
+                start = -len(parts[-1])
             yield Completion(
-                item.value,
+                value,
                 start_position=start,
-                display=item.value,
+                display=value,
                 display_meta=item.description,
             )
 

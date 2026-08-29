@@ -277,6 +277,29 @@ class TuiTestCase(unittest.TestCase):
         )
 
 
+    def test_slash_completer_boundaries(self) -> None:
+        """只按 / 不崩溃；候选替换位置连斜杠一起算，不产生双斜杠。"""
+        interface = ContiTui(FakeRuntime(), output=DummyOutput(), input=DummyInput())
+        completer = interface.command_completer
+
+        class FakeDocument:
+            def __init__(self, text: str) -> None:
+                self.text_before_cursor = text
+
+        def applied_text(text: str) -> list[str]:
+            results = []
+            for completion in completer.get_completions(FakeDocument(text), None):
+                start = completion.start_position
+                results.append(text[:len(text) + start] + completion.text)
+            return results
+
+        self.assertTrue(any(item == "/models" for item in applied_text("/")))
+        self.assertTrue(any(item == "/models" for item in applied_text("/mod")))
+        self.assertIn("/model active", applied_text("/model act"))
+        # 无候选时不产出、不报错。
+        self.assertEqual(applied_text("/nomatch"), [])
+
+
 def asyncio_run(awaitable: Any) -> None:
     import asyncio
     asyncio.run(awaitable)
