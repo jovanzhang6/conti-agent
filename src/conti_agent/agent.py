@@ -146,6 +146,7 @@ class Agent:
             try:
                 total_input = total_output = 0
                 length_retried = False
+                pending_calls: list[ToolCall] = []
                 for iteration in range(1, self.config.max_tool_iterations + 1):
                     if self.pre_request_hook is not None:
                         await self.pre_request_hook(messages)
@@ -194,7 +195,9 @@ class Agent:
                     for call in response.tool_calls or []:
                         emit(event("tool.requested", tool_call_id=call.id,
                                    tool_name=call.name, arguments=call.arguments))
+                        pending_calls.append(call)
                         result = await self._execute_call(call, emit)
+                        pending_calls.remove(call)
                         self._handle_tool_result(call, result, messages, emit)
                 emit(event("run.failed", error="maximum tool iterations reached",
                            error_type="AgentIterationLimit"))
@@ -203,6 +206,16 @@ class Agent:
                 emit(event("run.failed", error=str(exc), error_type=type(exc).__name__))
                 raise
             finally:
+                # 中断/异常时给每个未完成的 tool_call 补一条 tool_result：
+                # 协议要求 assistant(tool_calls) 必须有配对的 tool 消息，
+                # 否则下一轮请求（以及会话回放）都会因悬空配对而被拒。
+                for call in pending_calls:
+                    message = tool_message(
+                        call, "（任务被中断，该工具调用未执行完成）", is_error=True
+                    )
+                    messages.append(message)
+                    if self.session_store and self.session_id:
+                        self.session_store.append_message(self.session_id, message)
                 queue.put_nowait(None)
 
         task = asyncio.create_task(runner())

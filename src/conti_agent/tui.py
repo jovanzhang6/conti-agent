@@ -227,6 +227,13 @@ class TuiState:
         """工具/系统活动行：直接进入主对话流（codex 风格）。"""
         return self.append_message("activity", text)
 
+    def interrupt_activities(self) -> None:
+        """任务被中断时，把未完成的"开始…"活动行标记为已中断。"""
+        for message in self.pending_activity_messages.values():
+            if not message.text.startswith(("✓", "✗")):
+                message.text = f"✗ {message.text}（已中断）"
+        self.pending_activity_messages.clear()
+
     def stream_delta(self, text: str) -> None:
         assistant = next(
             (item for item in reversed(self.messages)
@@ -268,12 +275,13 @@ class TuiState:
                 is_error=bool(payload.get("is_error")), elapsed=elapsed,
             )
             mark = "✗ " if payload.get("is_error") else "✓ "
+            hint = "" if payload.get("is_error") else "（Ctrl+O 看详情）"
             message = self.pending_activity_messages.pop(call_id, None)
             if message is not None:
-                message.text = mark + summary
+                message.text = mark + summary + hint
                 message.render_cache = None
             else:
-                message = self.append_tool_activity(mark + summary)
+                message = self.append_tool_activity(mark + summary + hint)
             # 可展开详情：参数 + 结果预览（Ctrl+O 切换显示）。
             try:
                 args_text = json.dumps(arguments, ensure_ascii=False)
@@ -605,6 +613,9 @@ class ContiTui:
         self.sidebar_visible = True
         self._pending_invalidate = False
         self._request_input_future: asyncio.Future | None = None
+        self._request_input_options: list[str] | None = None
+        self._request_input_selected = 0
+        self._request_input_message: ChatMessage | None = None
         self.current_task: asyncio.Task | None = None
         self.command_registry = runtime.commands
         self.command_completer = CommandCompleter(self)
@@ -635,32 +646,62 @@ class ContiTui:
                                        if m.role == "activity"][-20:],
         )
 
+    async def _interrupt_current(self) -> None:
+        """Ctrl+C / Esc：中断当前任务或跳过 pending 的提问。"""
+        future = self._request_input_future
+        if future is not None and not future.done():
+            future.set_result("（用户按 Esc 跳过了这个问题）")
+            return
+        if self.current_task and not self.current_task.done():
+            self.state.busy = False
+            self.state.status = "正在取消当前任务"
+            self.current_task.cancel()
+            self.state.add_system("已发送取消请求。")
+        else:
+            self.state.status = "没有正在运行的任务"
+        self.invalidate()
+
+    def _waiting_with_options(self) -> bool:
+        return (self._request_input_future is not None
+                and not self._request_input_future.done()
+                and bool(self._request_input_options))
+
+    def _submit_input(self) -> None:
+        """统一提交：等待提问时解析回答（编号/自定义/选中项），否则发送任务。"""
+        future = self._request_input_future
+        options = self._request_input_options or []
+        if future is not None and not future.done():
+            text = self.input_control.text.strip()
+            self.input_control.text = ""
+            if text.isdigit() and 1 <= int(text) <= len(options):
+                future.set_result(options[int(text) - 1])
+            elif text:
+                future.set_result(text)
+            elif options:
+                future.set_result(options[self._request_input_selected])
+            return
+        prompt = self.input_control.text.strip()
+        if not prompt:
+            return
+        self.input_control.text = ""
+        asyncio.ensure_future(self.handle_prompt(prompt))
+
     def _make_input(self) -> Any:
         kb = KeyBindings()
         self.key_bindings = kb
 
-        async def _send_current() -> None:
-            prompt = self.input_control.text.strip()
-            if not prompt:
-                return
-            self.input_control.text = ""
-            await self.handle_prompt(prompt)
-
         @kb.add("enter", eager=True)
         async def _send(event: Any) -> None:
-            # 输入框未聚焦时的兜底发送；聚焦时由控件级绑定接管。
-            await _send_current()
+            # 输入框未聚焦时的兜底提交；聚焦时由控件级绑定接管。
+            self._submit_input()
 
         @kb.add("c-c")
         async def _cancel(event: Any) -> None:
-            if self.current_task and not self.current_task.done():
-                self.state.busy = False
-                self.state.status = "正在取消当前任务"
-                self.current_task.cancel()
-                self.state.add_system("已发送取消请求。")
-            else:
-                self.state.status = "没有正在运行的任务"
-            self.application.invalidate()
+            await self._interrupt_current()
+
+        @kb.add("escape", eager=True)
+        async def _escape(event: Any) -> None:
+            await self._interrupt_current()
 
         @kb.add("c-q")
         async def _quit(event: Any) -> None:
@@ -707,11 +748,21 @@ class ContiTui:
         # 控件级绑定优先级最高：multiline 下 Enter 一定发送，Ctrl+J 换行。
         @input_kb.add("enter", eager=True)
         async def _send_from_input(event: Any) -> None:
-            await _send_current()
+            self._submit_input()
 
         @input_kb.add("c-j")
         async def _insert_newline(event: Any) -> None:
             self.input_control.buffer.insert_text("\n")
+
+        waiting_options = Condition(self._waiting_with_options)
+
+        @input_kb.add("up", filter=waiting_options, eager=True)
+        async def _option_up(event: Any) -> None:
+            self._move_request_selection(-1)
+
+        @input_kb.add("down", filter=waiting_options, eager=True)
+        async def _option_down(event: Any) -> None:
+            self._move_request_selection(1)
 
         input_area = TextArea(
             multiline=True,
@@ -963,7 +1014,11 @@ class ContiTui:
         # 模型正在通过 request_input 等待澄清答案：本次输入就是回答。
         future = self._request_input_future
         if future is not None and not future.done():
-            future.set_result(prompt)
+            options = self._request_input_options or []
+            if prompt.isdigit() and 1 <= int(prompt) <= len(options):
+                future.set_result(options[int(prompt) - 1])
+            else:
+                future.set_result(prompt)
             return
         if prompt.startswith("/"):
             await self.handle_command(prompt)
@@ -975,21 +1030,52 @@ class ContiTui:
             return
         await self.run_prompt(prompt)
 
-    async def _answer_request_input(self, question: str) -> str:
-        """request_input 的 TUI 实现：问题进对话流，等用户在输入框作答，
-        全程不阻塞事件循环。"""
+    async def _answer_request_input(self, question: str,
+                                    options: list[str] | None = None) -> str:
+        """request_input 的 TUI 实现：问题与选项进对话流，↑↓ 选择或
+        直接输入自定义回答，全程不阻塞事件循环。"""
         self.state.add_system(f"❓ {question}")
+        self._request_input_options = list(options) if options else None
+        self._request_input_selected = 0
+        if self._request_input_options:
+            self._request_input_message = self.state.append_tool_activity(
+                self._options_text()
+            )
         self.state.status = "等待你回答上面的提问"
         self.viewport.scroll_to_bottom()
         self.invalidate()
         loop = asyncio.get_running_loop()
         self._request_input_future = loop.create_future()
         try:
-            return await self._request_input_future
+            answer = await self._request_input_future
         except asyncio.CancelledError:
-            return "（用户取消了本次任务）"
+            answer = "（用户取消了本次任务）"
         finally:
             self._request_input_future = None
+            self._request_input_options = None
+            self._request_input_message = None
+        self.state.append_tool_activity(f"✓ 你的回答：{answer}")
+        return answer
+
+    def _options_text(self) -> str:
+        lines = []
+        for index, option in enumerate(self._request_input_options or []):
+            marker = "❯" if index == self._request_input_selected else " "
+            lines.append(f"{marker} {index + 1}) {option}")
+        lines.append("  ↑↓ 选择 · Enter 确认 · 也可直接输入自定义回答")
+        return "\n".join(lines)
+
+    def _move_request_selection(self, delta: int) -> None:
+        options = self._request_input_options or []
+        if not options or self._request_input_future is None:
+            return
+        count = len(options)
+        self._request_input_selected = (
+            (self._request_input_selected + delta) % count
+        )
+        if self._request_input_message is not None:
+            self._request_input_message.text = self._options_text()
+        self.invalidate()
 
     async def handle_command(self, prompt: str) -> None:
         context = self._command_context()
@@ -1060,8 +1146,9 @@ class ContiTui:
             final_text, session_id, _ = await self.current_task
         except asyncio.CancelledError:
             self.state.finish_stream("")
-            self.state.add_system("任务已取消。")
-            self.state.status = "已取消"
+            self.state.interrupt_activities()
+            self.state.add_system("任务已中断，未完成的工具调用已标记为失败。")
+            self.state.status = "已中断"
         except Exception as exc:
             self.state.finish_stream("")
             self.state.add_system(f"任务失败：{type(exc).__name__}: {exc}")

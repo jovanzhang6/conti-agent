@@ -67,21 +67,30 @@ class TaskNoteTool(Tool):
 
 class RequestInputTool(Tool):
     name = "request_input"
-    description = "向本地用户请求一个澄清答案。"
+    description = "向本地用户请求一个澄清答案。可给出 2-4 个预设选项供快速选择，用户也可以自行输入。"
     parameters = {
         "type": "object",
-        "properties": {"question": {"type": "string"}},
+        "properties": {
+            "question": {"type": "string", "description": "要向用户澄清的问题"},
+            "options": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "预设答案选项（2-4 个短语，可为空）",
+            },
+        },
         "required": ["question"],
     }
     effects = frozenset({"control"})
 
-    def __init__(self, input_function: Callable[[str], str]) -> None:
+    def __init__(self, input_function: Callable[..., str]) -> None:
         self.input_function = input_function
 
     async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
-        answer = self.input_function(arguments["question"])
+        question = arguments["question"]
+        options = arguments.get("options") or None
+        answer = self.input_function(question, options)
         # TUI 等界面会注入异步处理器（等待用户在输入框作答，不阻塞事件循环）；
         # 同步 input() 只用于行式模式。
         if inspect.isawaitable(answer):
             answer = await answer
-        return ToolResult(answer, {"question": arguments["question"]})
+        return ToolResult(answer, {"question": question, "options": options or []})

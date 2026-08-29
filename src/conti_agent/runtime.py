@@ -126,11 +126,17 @@ class Runtime:
         self.output_function = output_function or (lambda text: print(text, file=sys.stdout))
         # 全屏界面注入的异步提问处理器：request_input 和权限批准都走它，
         # 避免阻塞式 input() 冻结事件循环。
-        self.async_input_handler: Callable[[str], Any] | None = None
+        self.async_input_handler: Callable[..., Any] | None = None
 
-    def _dispatch_input(self, question: str) -> Any:
+    def _dispatch_input(self, question: str,
+                        options: list[str] | None = None) -> Any:
         if self.async_input_handler is not None:
-            return self.async_input_handler(question)
+            return self.async_input_handler(question, options)
+        if options:
+            numbered = "\n".join(f"  {index}) {option}"
+                                 for index, option in enumerate(options, 1))
+            question = (question + "\n选项：" + numbered
+                        + "\n（输入编号或直接输入你的回答）")
         return self.input_function(question)
 
     async def _approve(self, key: str, arguments: dict[str, Any], reason: str) -> bool:

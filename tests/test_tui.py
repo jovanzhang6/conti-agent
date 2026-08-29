@@ -369,6 +369,30 @@ class TuiTestCase(unittest.TestCase):
 
         asyncio_run(scenario())
 
+    def test_request_input_options_selection(self) -> None:
+        async def scenario() -> None:
+            interface = ContiTui(FakeRuntime(), output=DummyOutput(),
+                                 input=DummyInput())
+            pending = asyncio.ensure_future(
+                interface.runtime.async_input_handler(
+                    "下一步做什么？", ["继续阅读", "跑测试"]))
+            await asyncio.sleep(0)
+            # 选项渲染，默认选中第一项。
+            self.assertIn("1) 继续阅读", interface._request_input_message.text)
+            interface._move_request_selection(1)
+            self.assertIn("❯ 2) 跑测试", interface._request_input_message.text)
+            # 空输入提交 = 确认选中项。
+            interface._submit_input()
+            self.assertEqual(await pending, "跑测试")
+            # 数字回答 = 选择对应选项。
+            pending2 = asyncio.ensure_future(
+                interface.runtime.async_input_handler("再来一次？", ["A", "B"]))
+            await asyncio.sleep(0)
+            await interface.handle_prompt("1")
+            self.assertEqual(await pending2, "A")
+
+        asyncio_run(scenario())
+
     def test_request_input_tool_supports_async_handler(self) -> None:
         import asyncio
 
@@ -376,13 +400,19 @@ class TuiTestCase(unittest.TestCase):
         from conti_agent.tools_misc import RequestInputTool
 
         async def scenario() -> None:
-            async def handler(question: str) -> str:
-                return f"回答：{question}"
+            received: list[tuple[str, list[str] | None]] = []
+
+            async def handler(question: str, options: list[str] | None = None) -> str:
+                received.append((question, options))
+                return "回答：2"
 
             tool = RequestInputTool(handler)
-            result = await tool.execute({"question": "用什么目录？"},
-                                        ToolContext(workspace=".", session_id="s"))
-            self.assertEqual(result.output, "回答：用什么目录？")
+            result = await tool.execute(
+                {"question": "下一步做什么？", "options": ["继续阅读", "跑测试"]},
+                ToolContext(workspace=".", session_id="s"),
+            )
+            self.assertEqual(result.output, "回答：2")
+            self.assertEqual(received[0][1], ["继续阅读", "跑测试"])
 
         asyncio_run(scenario())
 

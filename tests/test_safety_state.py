@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -169,6 +170,57 @@ permission_mode = "workspace"
         self.assertEqual(messages[0]["role"], "system")
         self.assertIn("当前工作区", messages[0]["content"])
         self.assertIn("workspace", messages[0]["content"])
+
+    async def test_agent_interrupt_fills_tool_results(self) -> None:
+        """中断时未完成的 tool_call 必须补合成 tool_result（协议配对完整，
+        主上下文与会话账本一致）。"""
+
+        class BlockingTool(Tool):
+            name = "blocking"
+            description = "永不完成的工具。"
+            parameters = {"type": "object", "properties": {}}
+            effects = frozenset({"read"})
+
+            async def execute(self, arguments: dict[str, Any],
+                              context: ToolContext) -> ToolResult:
+                await asyncio.Event().wait()
+                return ToolResult("never")
+
+        provider = FakeProvider([
+            ProviderResponse(tool_calls=[ToolCall("t1", "blocking", {})]),
+            ProviderResponse(text="done"),
+        ])
+        registry = ToolRegistry()
+        registry.register(BlockingTool())
+        store = SessionStore(self.root / ".conti")
+        session_id, _ = store.create(self.root, "中断测试")
+        messages = [user_message("跑")]
+        agent = Agent(provider, registry, self.context,
+                      session_store=store, session_id=session_id)
+
+        events: list[Any] = []
+
+        async def consume() -> None:
+            async for item in agent.run(messages):
+                events.append(item)
+
+        task = asyncio.ensure_future(consume())
+        for _ in range(200):
+            if any(item.type == "tool.requested" for item in events):
+                break
+            await asyncio.sleep(0.01)
+        self.assertTrue(any(item.type == "tool.requested" for item in events))
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        # 中断后合成 tool_result 追加到上下文与账本，配对完整。
+        self.assertEqual(messages[-1]["role"], "tool")
+        self.assertIn("中断", messages[-1]["content"])
+        _, resumed = store.load(session_id)
+        self.assertEqual(resumed[-1]["role"], "tool")
+        self.assertIn("中断", resumed[-1]["content"])
 
     async def test_tool_call_assistant_message_is_persisted(self) -> None:
         from conti_agent.sessions import SessionStore
