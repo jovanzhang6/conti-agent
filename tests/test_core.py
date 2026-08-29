@@ -15,6 +15,7 @@ from conti_agent.providers import (
     FakeProvider,
     OpenAICompatibleProvider,
     ProviderResponse,
+    _load_tool_arguments,
 )
 from conti_agent.tools import Tool, ToolContext, ToolRegistry, ToolResult, execute_tool
 
@@ -164,6 +165,18 @@ class CoreTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(captured["payload"]["stream"])
         self.assertEqual(deltas, [" streamed"])
         self.assertEqual(response.text, "streamed")
+
+    def test_tool_arguments_repair_unescaped_backslashes(self) -> None:
+        # 模型写 Windows 路径漏掉反斜杠转义（非法 JSON）也能修复解析。
+        invalid = '{"path": "D:\\conti-agent\\src\\x.py"}'
+        parsed = _load_tool_arguments(invalid)
+        self.assertEqual(parsed["path"], "D:\\conti-agent\\src\\x.py")
+        # 合法 JSON 原样通过。
+        valid = '{"note": "a\\\\b"}'
+        self.assertEqual(_load_tool_arguments(valid), {"note": "a\\b"})
+        # 无法修复时保持原有报错语义。
+        with self.assertRaises(ProviderError):
+            _load_tool_arguments('{"path": "unfinished')
 
     def test_anthropic_transport_mapping(self) -> None:
         def transport(url: str, method: str, headers: dict[str, str], payload: dict[str, Any]):

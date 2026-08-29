@@ -13,6 +13,26 @@ from .errors import ProviderError
 from .messages import ToolCall, Usage
 from .tools import ToolRegistry
 
+# JSON 合法转义字符：\u0000-\u001f 之外只允许 "\ / b f n r t u。
+_UNESCAPED_BACKSLASH_RE = re.compile(r'\\(?!["\\/bfnrtu])')
+
+
+def _load_tool_arguments(raw: str) -> dict[str, Any]:
+    """解析流式聚合的工具参数。
+
+    模型写 Windows 路径时经常漏掉反斜杠转义（D:\conti 而不是
+    D:\\conti），严格解析会报 Invalid \\escape；先做一次修复重试：
+    把后面不跟合法转义字符的孤立反斜杠补成双反斜杠。
+    """
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        repaired = _UNESCAPED_BACKSLASH_RE.sub(r'\\\\', raw)
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError as exc:
+            raise ProviderError(f"无效的工具参数流：{exc}") from exc
+
 
 StreamHandler = Callable[[str, dict[str, Any]], None]
 
@@ -269,10 +289,7 @@ class OpenAICompatibleProvider(Provider):
         calls: list[ToolCall] = []
         for index in sorted(tool_parts):
             item = tool_parts[index]
-            try:
-                arguments = json.loads(item["arguments"] or "{}")
-            except json.JSONDecodeError as exc:
-                raise ProviderError(f"无效的工具参数流：{exc}") from exc
+            arguments = _load_tool_arguments(item["arguments"] or "{}")
             wire_name = item["name"]
             calls.append(ToolCall(
                 item["id"] or f"call_{index}",
