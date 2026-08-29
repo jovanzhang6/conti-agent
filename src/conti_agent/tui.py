@@ -40,6 +40,10 @@ STARTUP_LOGO = r"""
  \____| \____|_| \_|  |_|   \___/\___/
 """
 
+# 单帧渲染的字符预算：pt 每帧会对全部可见内容重新折行，
+# 超过预算就从最旧的消息开始省略（渲染层省略，不影响会话账本）。
+_RENDER_CHAR_BUDGET = 48_000
+
 
 @dataclass
 class ChatMessage:
@@ -282,11 +286,27 @@ class TuiState:
         fragments: list[tuple[str, str]] = []
         if not self.messages:
             return [("class:muted", "还没有对话。\n输入你的第一个任务。")]
-        for index, message in enumerate(self.messages):
-            if index:
+        # 渲染预算：超预算时省略最早的消息，避免每帧重新折行全部历史
+        # 导致渲染耗时随对话增长失控（翻页/流式卡死的根因）。
+        messages = self.messages
+        start = 0
+        total_chars = 0
+        for message in messages:
+            total_chars += len(message.text)
+        if total_chars > _RENDER_CHAR_BUDGET:
+            overflow = total_chars - _RENDER_CHAR_BUDGET
+            while start < len(messages) - 8 and overflow > 0:
+                overflow -= len(messages[start].text) + 20
+                start += 1
+        if start:
+            fragments.append(("class:muted",
+                              f"…… 已省略最早的 {start} 条消息"
+                              "（完整记录见会话账本）\n"))
+        for offset, message in enumerate(messages[start:], start):
+            if offset > start:
                 # 活动行与相邻内容紧凑排列，不插空行。
                 gap = ("\n" if (message.role == "activity"
-                                or self.messages[index - 1].role == "activity")
+                                or messages[offset - 1].role == "activity")
                        else "\n\n")
                 fragments.append(("", gap))
             if message.role == "activity":
@@ -542,6 +562,8 @@ class ContiTui:
         self.state = TuiState(runtime.describe())
         self.viewport = ViewportState()
         self.sidebar_visible = True
+        self._pending_invalidate = False
+        self._request_input_future: asyncio.Future | None = None
         self.current_task: asyncio.Task | None = None
         self.command_registry = runtime.commands
         self.command_completer = CommandCompleter(self)
@@ -556,8 +578,11 @@ class ContiTui:
         self.command_context = self._command_context()
         self.layout = self._build_layout()
         self.application = self._build_application()
-        if self.output is None:
-            enable_blinking_cursor()
+        self.runtime.async_input_handler = self._answer_request_input
+        if self.output is None and sys.platform == "win32":
+            # 真实终端：启用 VT 并补上光标形状支持（闪烁竖线）。
+            enable_console_vt()
+            self.application.output = BlinkingCursorOutput(self.application.output)
 
     def _command_context(self) -> CommandContext:
         session_id = None if self.state.session_id == "新会话" else self.state.session_id
@@ -688,15 +713,30 @@ class ContiTui:
             ScrollablePane(content, display_arrows=False),
         ], width=37)
 
+    def _input_meta_fragments(self) -> list[tuple[str, str]]:
+        info = self.state.runtime_info
+        percent = self.runtime.context_usage_percent()
+        usage_style = "class:status-busy" if percent >= 85 else "class:status-key"
+        return [
+            ("class:status-key", f" {info.get('model', '-')} "),
+            ("class:status-sep", "│"),
+            ("class:muted", " Enter 发送 · Ctrl+J 换行 "),
+            ("class:status-sep", "│"),
+            (usage_style, f" 上下文 {percent}% "),
+        ]
+
     def _input_area(self) -> Any:
-        return HSplit([
-            Window(height=1, char="─", style="class:separator"),
-            VSplit([
-                Window(width=1, char=" "),
-                Window(width=1, char="▍", style="class:input-accent"),
+        return VSplit([
+            Window(width=1, char=" "),
+            HSplit([
+                Window(
+                    FormattedTextControl(self._input_meta_fragments),
+                    height=1,
+                    style="class:input-meta",
+                ),
                 self.input_control,
-            ], height=3, style="class:input-area"),
-        ])
+            ]),
+        ], height=4, style="class:input-area")
 
     def _build_layout(self) -> Any:
         conversation = self._conversation()
@@ -716,20 +756,8 @@ class ContiTui:
         ]
 
     def _model_status_fragments(self) -> list[tuple[str, str]]:
-        info = self.state.runtime_info
         style = "class:status-busy" if self.state.busy else "class:status-idle"
-        usage_style = ("class:status-busy"
-                       if self.runtime.context_usage_percent() >= 85
-                       else "class:status-key")
-        return [
-            ("class:status-key", f" {info.get('model', '-')} "),
-            ("class:status-sep", "│"),
-            ("class:status-key", f" {len(info.get('tools', []))} tools "),
-            ("class:status-sep", "│"),
-            (usage_style, f" 上下文 {self.runtime.context_usage_percent()}% "),
-            ("class:status-sep", "│"),
-            (style, f" {self.state.status} "),
-        ]
+        return [(style, f" {self.state.status} ")]
 
     def _shortcut_fragments(self) -> list[tuple[str, str]]:
         return [
@@ -845,7 +873,29 @@ class ContiTui:
     def invalidate(self) -> None:
         self.application.invalidate()
 
+    def invalidate_soon(self) -> None:
+        """流式输出的节流刷新：约 12fps，避免每条 delta 触发全量渲染。"""
+        if self._pending_invalidate:
+            return
+        self._pending_invalidate = True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._pending_invalidate = False
+            self.application.invalidate()
+            return
+        loop.call_later(0.08, self._flush_invalidate)
+
+    def _flush_invalidate(self) -> None:
+        self._pending_invalidate = False
+        self.application.invalidate()
+
     async def handle_prompt(self, prompt: str) -> None:
+        # 模型正在通过 request_input 等待澄清答案：本次输入就是回答。
+        future = self._request_input_future
+        if future is not None and not future.done():
+            future.set_result(prompt)
+            return
         if prompt.startswith("/"):
             await self.handle_command(prompt)
             self.invalidate()
@@ -855,6 +905,22 @@ class ContiTui:
             self.invalidate()
             return
         await self.run_prompt(prompt)
+
+    async def _answer_request_input(self, question: str) -> str:
+        """request_input 的 TUI 实现：问题进对话流，等用户在输入框作答，
+        全程不阻塞事件循环。"""
+        self.state.add_system(f"❓ {question}")
+        self.state.status = "等待你回答上面的提问"
+        self.viewport.scroll_to_bottom()
+        self.invalidate()
+        loop = asyncio.get_running_loop()
+        self._request_input_future = loop.create_future()
+        try:
+            return await self._request_input_future
+        except asyncio.CancelledError:
+            return "（用户取消了本次任务）"
+        finally:
+            self._request_input_future = None
 
     async def handle_command(self, prompt: str) -> None:
         context = self._command_context()
@@ -951,11 +1017,11 @@ class ContiTui:
 
     def _on_text_delta(self, text: str) -> None:
         self.state.stream_delta(text)
-        self.invalidate()
+        self.invalidate_soon()
 
     def _on_event(self, event: Any) -> None:
         self.state.record_event(event)
-        self.invalidate()
+        self.invalidate_soon()
 
     async def run_async(self) -> str:
         try:
@@ -1003,9 +1069,46 @@ def show_startup_logo() -> None:
     print("\033[90m  正在初始化界面...\033[0m", flush=True)
 
 
-def enable_blinking_cursor() -> None:
-    """Windows 下 prompt_toolkit 的输出类不实现光标形状（空操作），
-    直接发 DECSCUSR 请求“闪烁竖线”；仅在真实终端调用。"""
+class BlinkingCursorOutput:
+    """pt 的 Windows 输出类不实现 set_cursor_shape（空操作），
+    导致光标闪烁/形状设置完全无效。代理一层，补上 DECSCUSR；
+    每次重新显示光标（打字、重绘）后重申形状，避免被终端默认值覆盖。"""
+
+    _SEQUENCES = {
+        CursorShape.BLINKING_BEAM: "\x1b[5 q",
+        CursorShape.BEAM: "\x1b[4 q",
+        CursorShape.BLINKING_BLOCK: "\x1b[1 q",
+        CursorShape.BLOCK: "\x1b[2 q",
+        CursorShape.BLINKING_UNDERLINE: "\x1b[3 q",
+        CursorShape.UNDERLINE: "\x1b[6 q",
+    }
+
+    def __init__(self, wrapped: Any) -> None:
+        self._wrapped = wrapped
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._wrapped, name)
+
+    def _write(self, data: str) -> None:
+        try:
+            sys.stdout.write(data)
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+    def set_cursor_shape(self, shape: Any) -> None:
+        self._write(self._SEQUENCES.get(shape, ""))
+
+    def reset_cursor_shape(self) -> None:
+        self._write("\x1b[0 q")
+
+    def show_cursor(self) -> None:
+        self._wrapped.show_cursor()
+        self._write(self._SEQUENCES.get(CursorShape.BLINKING_BEAM, ""))
+
+
+def enable_console_vt() -> None:
+    """持久启用虚拟终端处理，让 DECSCUSR 序列在 flush 之外也生效。"""
     if sys.platform != "win32":
         return
     try:
@@ -1013,12 +1116,9 @@ def enable_blinking_cursor() -> None:
         kernel32 = ctypes.windll.kernel32
         handle = kernel32.GetStdHandle(-11)
         mode = ctypes.c_uint32()
-        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-            return
-        if not mode.value & 0x0004:  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
-            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
-        sys.stdout.write("\x1b[5 q")
-        sys.stdout.flush()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            if not mode.value & 0x0004:  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+                kernel32.SetConsoleMode(handle, mode.value | 0x0004)
     except Exception:
         pass
 

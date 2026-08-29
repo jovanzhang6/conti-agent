@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import sys
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
@@ -95,9 +96,7 @@ class Runtime:
         self.skill_library = SkillLibrary(self.root / "skills")
         self.registry.register(LoadSkillTool(self.skill_library))
         self.registry.register(TaskNoteTool(self.workspace))
-        self.registry.register(RequestInputTool(
-            input_function or (lambda question: input(question + "\n> "))
-        ))
+        self.registry.register(RequestInputTool(self._dispatch_input))
         self.profile_runner = ProfileRunner(
             self.provider,
             self.registry,
@@ -125,10 +124,20 @@ class Runtime:
         self._update_context_window(self.provider_config)
         self.input_function = input_function or (lambda question: input(question + "\n> "))
         self.output_function = output_function or (lambda text: print(text, file=sys.stdout))
+        # 全屏界面注入的异步提问处理器：request_input 和权限批准都走它，
+        # 避免阻塞式 input() 冻结事件循环。
+        self.async_input_handler: Callable[[str], Any] | None = None
+
+    def _dispatch_input(self, question: str) -> Any:
+        if self.async_input_handler is not None:
+            return self.async_input_handler(question)
+        return self.input_function(question)
 
     async def _approve(self, key: str, arguments: dict[str, Any], reason: str) -> bool:
         """默认交互式批准入口；服务模式可注入显式批准策略。"""
-        answer = self.input_function(f"需要批准：{reason}（yes/no）")
+        answer = self._dispatch_input(f"需要批准：{reason}（yes/no）")
+        if inspect.isawaitable(answer):
+            answer = await answer
         return answer.strip().lower() in {"y", "yes"}
 
     def register_extra(self, tool) -> None:

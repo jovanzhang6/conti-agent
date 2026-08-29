@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 from typing import Any, Callable
@@ -79,4 +80,8 @@ class RequestInputTool(Tool):
 
     async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         answer = self.input_function(arguments["question"])
+        # TUI 等界面会注入异步处理器（等待用户在输入框作答，不阻塞事件循环）；
+        # 同步 input() 只用于行式模式。
+        if inspect.isawaitable(answer):
+            answer = await answer
         return ToolResult(answer, {"question": arguments["question"]})

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from typing import Any
 
@@ -342,6 +343,48 @@ class TuiTestCase(unittest.TestCase):
         # 内容不足一屏：整列留空，不报错。
         Info.content_height = 10
         self.assertEqual(control._fragments(), [])
+
+
+    def test_request_input_flow_does_not_block(self) -> None:
+        """模型调用 request_input 时：问题进对话流、用户输入作为回答返回，
+        不阻塞事件循环、不误发新任务（历史冻结 bug 的回归测试）。"""
+
+        async def scenario() -> None:
+            interface = ContiTui(FakeRuntime(), output=DummyOutput(),
+                                 input=DummyInput())
+            handler = interface.runtime.async_input_handler
+            self.assertTrue(callable(handler))
+            pending = asyncio.ensure_future(handler("要读取哪两个文件？"))
+            await asyncio.sleep(0)
+            # 问题进入对话流，界面等待回答。
+            self.assertTrue(any("要读取哪两个文件？" in m.text
+                                for m in interface.state.messages))
+            # 用户在输入框输入的内容成为回答，而不是新任务。
+            interface.input_control.text = "读 a.py 和 b.py"
+            await interface.handle_prompt("读 a.py 和 b.py")
+            self.assertEqual(await pending, "读 a.py 和 b.py")
+            self.assertIsNone(interface._request_input_future)
+            self.assertFalse(any(m.role == "assistant" and m.text == "读 a.py 和 b.py"
+                                 for m in interface.state.messages))
+
+        asyncio_run(scenario())
+
+    def test_request_input_tool_supports_async_handler(self) -> None:
+        import asyncio
+
+        from conti_agent.tools import ToolContext
+        from conti_agent.tools_misc import RequestInputTool
+
+        async def scenario() -> None:
+            async def handler(question: str) -> str:
+                return f"回答：{question}"
+
+            tool = RequestInputTool(handler)
+            result = await tool.execute({"question": "用什么目录？"},
+                                        ToolContext(workspace=".", session_id="s"))
+            self.assertEqual(result.output, "回答：用什么目录？")
+
+        asyncio_run(scenario())
 
 
 def asyncio_run(awaitable: Any) -> None:
