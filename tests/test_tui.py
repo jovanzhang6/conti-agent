@@ -66,8 +66,8 @@ class FakeRuntime:
     def active_provider_name(self) -> str:
         return "active"
 
-    def context_usage_percent(self) -> int:
-        return 12
+    def context_usage(self) -> tuple[int, int, int]:
+        return 50_000, 1_000_000, 5
 
     def get_provider_info(self, name: str) -> dict[str, Any]:
         if name not in ("active", "other"):

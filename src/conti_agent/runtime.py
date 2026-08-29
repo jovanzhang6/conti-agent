@@ -239,6 +239,17 @@ class Runtime:
         projected = self.context_manager.projected_input_tokens()
         return min(100, round(100 * projected / window))
 
+    def context_usage(self) -> tuple[int, int, int]:
+        """(当前上下文 token, 窗口大小, 百分比)。
+
+        注意：这是“下一次请求将携带的上下文”（精确基线 + 增量），
+        不是会话的累计消耗——累计值每次请求都会重复计入历史，会远大
+        于当前占用。
+        """
+        window = max(1, self.context_manager.context_window)
+        projected = self.context_manager.projected_input_tokens()
+        return projected, window, min(100, round(100 * projected / window))
+
     async def ask(self, prompt: str, *, session_id: str | None = None,
                   output_format: str = "text",
                   text_callback: Callable[[str], None] | None = None,

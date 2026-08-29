@@ -393,7 +393,7 @@ class TuiState:
         fragments.append(("", f"{str(self.session_id)[:18]}\n"))
         fragments.append(("class:key", "tools     "))
         fragments.append(("", f"{self.tool_count}\n"))
-        fragments.append(("class:key", "tokens    "))
+        fragments.append(("class:key", "累计tokens"))
         fragments.append(("", (
             f"{self.usage['input_tokens']} in / "
             f"{self.usage['output_tokens']} out\n"
@@ -586,6 +586,13 @@ class ScrollbarWindow(Window):
         return None
 
 
+def _short_tokens(count: int) -> str:
+    if count >= 1_000_000:
+        value = count / 1_000_000
+        return f"{value:.1f}M" if value < 10 else f"{value:.0f}M"
+    return f"{round(count / 1000):.0f}K"
+
+
 class ContiTui:
     """独立的 prompt_toolkit 全屏界面，不依赖任何原项目视觉。"""
 
@@ -754,14 +761,16 @@ class ContiTui:
 
     def _input_meta_fragments(self) -> list[tuple[str, str]]:
         info = self.state.runtime_info
-        percent = self.runtime.context_usage_percent()
+        tokens, window, percent = self.runtime.context_usage()
         usage_style = "class:status-busy" if percent >= 85 else "class:status-key"
         return [
             ("class:status-key", f" {info.get('model', '-')} "),
             ("class:status-sep", "│"),
             ("class:muted", " Enter 发送 · Ctrl+J 换行 "),
             ("class:status-sep", "│"),
-            (usage_style, f" 上下文 {percent}% "),
+            (usage_style,
+             f" 上下文 {_short_tokens(tokens)}/{_short_tokens(window)}"
+             f" · {percent}% "),
         ]
 
     def _input_area(self) -> Any:
