@@ -462,14 +462,15 @@ class ScrollbarControl(UIControl):
         state = self._sync_from_body()
         if state is None:
             return []
+        viewport = self.viewport
         offset, content = state
-        if content <= 1 or content <= self.viewport.window_height:
+        if content <= 1 or content <= viewport.window_height:
             return []
         fragments: list[tuple[str, str]] = [("class:scrollbar-arrow", "▲\n")]
-        track = max(1, self.viewport.window_height - 2)
+        track = max(1, viewport.window_height - 2)
         thumb = max(1, min(
             track,
-            round(track * self.viewport.window_height / content),
+            round(track * viewport.window_height / content),
         ))
         max_anchor = max(1, content - 1)
         # 跟随模式必然贴底，滑块直接钉在轨道末端，避免逻辑行/显示行

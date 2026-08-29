@@ -300,6 +300,40 @@ class TuiTestCase(unittest.TestCase):
         self.assertEqual(applied_text("/nomatch"), [])
 
 
+    def test_scrollbar_fragments_render_in_both_modes(self) -> None:
+        """滚动条渲染路径必须有输出且不抛错（内容超出一屏时的真实场景）。"""
+        from conti_agent.tui import ScrollbarControl
+
+        class Info:
+            vertical_scroll = 40
+            content_height = 100
+            window_height = 20
+            displayed_lines = list(range(40, 60))
+            bottom_visible = False
+
+        class Body:
+            render_info = Info()
+
+        viewport = ViewportState()
+        control = ScrollbarControl(viewport, Body())
+
+        # 跟随模式：有滑块，且滑块钉在轨道末端（▼ 之前一格是 █）。
+        viewport.follow_bottom = True
+        fragments = control._fragments()
+        text = "".join(item[1] for item in fragments)
+        self.assertIn("█", text)
+        self.assertTrue(text.replace("\n", "").endswith("█▼"))
+
+        # 手动阅读模式：同样必须能渲染。
+        viewport.follow_bottom = False
+        fragments = control._fragments()
+        self.assertIn("█", "".join(item[1] for item in fragments))
+
+        # 内容不足一屏：整列留空，不报错。
+        Info.content_height = 10
+        self.assertEqual(control._fragments(), [])
+
+
 def asyncio_run(awaitable: Any) -> None:
     import asyncio
     asyncio.run(awaitable)
