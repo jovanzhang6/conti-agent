@@ -279,6 +279,7 @@ class Runtime:
             pending = pending_messages[self.context_manager.observed_count:]
             if force or self.context_manager.needs_compaction(pending_messages,
                                                               pending):
+                events.append(event("context.compacting", reason=reason))
                 if await self.compact_messages(pending_messages, session_id,
                                                reason=reason):
                     events.append(event("context.compacted", reason=reason))
@@ -317,6 +318,7 @@ class Runtime:
             except ProviderError as exc:
                 if attempt == 0 and self._is_context_overflow(exc):
                     # 上下文超限：不向用户抛错，静默压缩后重试一次。
+                    events.append(event("context.compacting", reason="overflow"))
                     if await self.compact_messages(messages, session_id, reason="overflow"):
                         events.append(event("context.compacted", reason="overflow"))
                     continue

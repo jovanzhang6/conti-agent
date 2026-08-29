@@ -442,6 +442,80 @@ class TuiTestCase(unittest.TestCase):
         self.assertIn("会话：", latest)
 
 
+    def test_layout_fills_height_and_activity_expands(self) -> None:
+        """footer 必须贴底（不能按权重分走半屏），活动详情可展开。"""
+        import asyncio
+        from unittest import mock
+
+        from prompt_toolkit.data_structures import Size
+        from prompt_toolkit.layout.mouse_handlers import MouseHandlers
+        from prompt_toolkit.layout.screen import Screen, WritePosition
+
+        async def scenario() -> None:
+            class _StubLayout:
+                current_control = None
+                current_window = None
+
+            class _StubApp:
+                render_counter = 0
+                layout = _StubLayout()
+
+            stub = _StubApp()
+            interface = ContiTui(FakeRuntime(), output=DummyOutput(),
+                                 input=DummyInput())
+            state = interface.state
+            state.messages.clear()
+            state.append_message("user", "读取文件")
+            state.record_event(event("tool.requested", tool_name="workspace_read",
+                                     tool_call_id="c1",
+                                     arguments={"path": "a.py"}))
+            state.record_event(event("tool.completed", tool_name="workspace_read",
+                                     tool_call_id="c1", is_error=False,
+                                     output="文件内容片段", arguments={"path": "a.py"}))
+
+            def render() -> list[str]:
+                stub.render_counter += 1
+                interface.output.size = Size(rows=24, columns=100)
+                root = interface._root_layout()
+                screen = Screen()
+                root.write_to_screen(screen, MouseHandlers(),
+                                     WritePosition(0, 0, 100, 24), "", True, None)
+                return ["".join(screen.data_buffer[y][x].char
+                                for x in range(100)).rstrip() for y in range(24)]
+
+            with mock.patch("prompt_toolkit.layout.controls.get_app",
+                            return_value=stub):
+                lines = render()
+            # footer 贴在最后一行（不能按权重分走半屏留下大片空白）。
+            self.assertIn("Enter 发送", lines[23])
+            self.assertIn("Ctrl+O 详情", lines[23])
+
+            # 收起状态：不含详情。
+            self.assertFalse(any("文件内容片段" in line for line in lines))
+            # Ctrl+O 展开后：参数与结果预览可见。
+            state.activity_expanded = True
+            with mock.patch("prompt_toolkit.layout.controls.get_app",
+                            return_value=stub):
+                lines = render()
+            joined = "\n".join(lines)
+            self.assertIn('"path": "a.py"', joined)
+            self.assertIn("文件内容片段", joined)
+            self.assertIn("参数：", joined)
+
+        asyncio_run(scenario())
+
+    def test_compaction_shows_start_then_done(self) -> None:
+        state = TuiState(FakeRuntime().describe())
+        state.record_event(event("context.compacting", reason="auto"))
+        self.assertTrue(any("正在压缩" in m.text
+                            for m in state.messages if m.role == "activity"))
+        state.record_event(event("context.compacted", reason="auto"))
+        activity = [m for m in state.messages if m.role == "activity"]
+        # 开始行被原位更新为完成，不产生第二条。
+        self.assertEqual(len(activity), 1)
+        self.assertIn("已压缩早期历史为摘要", activity[0].text)
+
+
 def asyncio_run(awaitable: Any) -> None:
     import asyncio
     asyncio.run(awaitable)

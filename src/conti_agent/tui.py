@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import sys
 import time
@@ -57,6 +58,8 @@ class ChatMessage:
     render_cache: tuple[str, list[tuple[str, str]]] | None = field(
         default=None, repr=False, compare=False
     )
+    # 工具活动的可展开详情（参数与结果预览），Ctrl+O 切换显示。
+    details: str | None = field(default=None, repr=False, compare=False)
 
 
 _MD_INLINE = re.compile(r"(`[^`]+`|\*\*[^*\n]+?\*\*|\*[^*\n]+?\*)")
@@ -206,6 +209,7 @@ class TuiState:
         self.error_count = 0
         self.pending_activities: dict[str, tuple[str, dict[str, Any]]] = {}
         self.pending_activity_messages: dict[str, Any] = {}
+        self.activity_expanded = False
         self.add_system(
             "输入任务后按 Enter 发送。/help 查看命令，Ctrl+C 取消当前任务，Ctrl+Q 退出。"
         )
@@ -269,17 +273,35 @@ class TuiState:
                 message.text = mark + summary
                 message.render_cache = None
             else:
-                self.append_tool_activity(mark + summary)
+                message = self.append_tool_activity(mark + summary)
+            # 可展开详情：参数 + 结果预览（Ctrl+O 切换显示）。
+            try:
+                args_text = json.dumps(arguments, ensure_ascii=False)
+            except TypeError:
+                args_text = str(arguments)
+            output = str(payload.get("output") or "")
+            message.details = (
+                f"参数：{args_text}\n"
+                f"结果：{output[:1200]}" + ("…（已截断）" if len(output) > 1200 else "")
+            )[:1500]
         elif event_type == "usage.recorded":
             self.usage["input_tokens"] += int(payload.get("input_tokens", 0))
             self.usage["output_tokens"] += int(payload.get("output_tokens", 0))
         elif event_type == "run.retry":
             self.append_tool_activity(f"↻ Provider 重试 {payload.get('attempt')}")
+        elif event_type == "context.compacting":
+            message = self.append_tool_activity("⚙ 正在压缩上下文…")
+            self.pending_activity_messages["__compaction__"] = message
         elif event_type == "context.compacted":
             note = ("上下文超限" if payload.get("reason") == "overflow"
                     else "回复被截断" if payload.get("reason") == "truncated"
                     else "上下文接近上限")
-            self.append_tool_activity(f"⚙ {note}，已压缩早期历史为摘要")
+            message = self.pending_activity_messages.pop("__compaction__", None)
+            text = f"⚙ {note}，已压缩早期历史为摘要"
+            if message is not None:
+                message.text = text
+            else:
+                self.append_tool_activity(text)
         elif event_type == "run.failed":
             # 只更新状态与计数；错误详情由任务异常路径统一展示一次。
             self.error_count += 1
@@ -318,6 +340,11 @@ class TuiState:
                 fragments.append(("", gap))
             if message.role == "activity":
                 fragments.append(("class:activity", message.text))
+                if message.details and self.activity_expanded:
+                    fragments.append(("", "\n"))
+                    for line in message.details.split("\n"):
+                        fragments.append(("class:activity-detail",
+                                          "    " + line + "\n"))
                 continue
             icon, style = {
                 "user": ("▶ ", "class:user-heading"),
@@ -638,6 +665,11 @@ class ContiTui:
         async def _toggle_panel(event: Any) -> None:
             self._toggle_panel()
 
+        @kb.add("c-o", eager=True)
+        async def _toggle_activity_details(event: Any) -> None:
+            self.state.activity_expanded = not self.state.activity_expanded
+            self.invalidate()
+
         @kb.add("pageup", eager=True)
         async def _page_up(event: Any) -> None:
             self.viewport.page_up()
@@ -777,6 +809,8 @@ class ContiTui:
             ("class:status-key", " Ctrl+Q 退出 "),
             ("class:status-sep", "│"),
             ("class:status-key", " PageUp/PageDown 翻页 "),
+            ("class:status-sep", "│"),
+            ("class:status-key", " Ctrl+O 详情 "),
         ]
 
     def _status_fragments(self) -> list[tuple[str, str]]:
@@ -808,7 +842,7 @@ class ContiTui:
                 FormattedTextControl(self._shortcut_fragments),
                 align=WindowAlign.RIGHT,
             ),
-        ])
+        ], height=1)
         hint = Window(
             FormattedTextControl(self._too_small_fragments, show_cursor=False),
             style="class:muted",
@@ -880,6 +914,7 @@ class ContiTui:
             "scrollbar-arrow": "#33414d",
             "scrollbar-thumb": "#0ea5e9",
             "scrollbar-track": "#1c2733",
+            "activity-detail": "#71808f",
             "md-heading": "#7dd3fc bold",
             "md-bold": "#eef5fa bold",
             "md-italic": "italic #b9c8d4",
