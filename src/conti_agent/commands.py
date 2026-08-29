@@ -179,8 +179,12 @@ def create_default_registry() -> CommandRegistry:
 
     def status_handler(context: CommandContext, arguments: list[str]) -> CommandResult:
         info = context.runtime.describe()
-        lines = [f"{key}: {value}" for key, value in info.items()]
-        lines.append(f"session: {context.session_id or '新会话（尚未创建）'}")
+        session = context.session_id or "新会话（尚未创建）"
+        lines = [
+            f"模型：{info.get('provider')} / {info.get('model')}（{info.get('protocol')}）",
+            f"权限：{info.get('permission_mode')}    工作区：{info.get('workspace')}",
+            f"工具：{len(info.get('tools', []))} 个    会话：{session}",
+        ]
         return CommandResult(lines, data={"runtime": info,
                                           "session_id": context.session_id})
 

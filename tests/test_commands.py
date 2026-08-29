@@ -133,7 +133,7 @@ class CommandTestCase(unittest.TestCase):
         result = asyncio.run(
             registry.execute("/status", CommandContext(runtime, session_id="s9"))
         )
-        self.assertIn("session: s9", result.output)
+        self.assertIn("会话：s9", "\n".join(result.output))
 
     def test_resume_backfills_history(self) -> None:
         registry = create_default_registry()

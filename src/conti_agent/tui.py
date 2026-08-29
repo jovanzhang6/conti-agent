@@ -14,8 +14,11 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.layout import (
+    CompletionsMenu,
     ConditionalContainer,
     Dimension,
+    Float,
+    FloatContainer,
     FormattedTextControl,
     HSplit,
     Layout,
@@ -810,12 +813,25 @@ class ContiTui:
             FormattedTextControl(self._too_small_fragments, show_cursor=False),
             style="class:muted",
         )
-        return HSplit([
-            ConditionalContainer(header, filter=~too_small),
-            ConditionalContainer(self.layout, filter=~too_small),
-            ConditionalContainer(footer, filter=~too_small),
-            ConditionalContainer(hint, filter=too_small),
-        ])
+        # 补全菜单必须挂在 FloatContainer 上，否则候选永远不会显示。
+        return FloatContainer(
+            HSplit([
+                ConditionalContainer(header, filter=~too_small),
+                ConditionalContainer(self.layout, filter=~too_small),
+                ConditionalContainer(footer, filter=~too_small),
+                ConditionalContainer(hint, filter=too_small),
+            ]),
+            floats=[
+                Float(
+                    xcursor=True,
+                    ycursor=True,
+                    content=CompletionsMenu(
+                        max_height=6,
+                        scroll_offset=4,
+                    ),
+                ),
+            ],
+        )
 
     def _rebuild_layout(self) -> None:
         self.layout = self._build_layout()
@@ -872,6 +888,11 @@ class ContiTui:
             "md-bullet": "#0ea5e9 bold",
             "md-quote": "italic #8fa7b7",
             "md-rule": "#33414d",
+            "completion-menu": "bg:#101820 #dbe7ee",
+            "completion-menu.completion": "bg:#101820 #dbe7ee",
+            "completion-menu.completion.current": "bg:#0ea5e9 #04121d bold",
+            "completion-menu.meta.completion": "bg:#101820 #5c6c7c",
+            "completion-menu.meta.completion.current": "bg:#0ea5e9 #04121d",
         })
 
     def invalidate(self) -> None:
@@ -952,8 +973,9 @@ class ContiTui:
         self.state.status = result.output[0] if result.output else result.status
 
         # clear 的输出要在清理后再显示；其余命令直接显示。
-        for line in result.output:
-            self.state.add_system(line)
+        # 多行输出合并为一条系统消息，避免每行都带 SYSTEM 标题。
+        if result.output:
+            self.state.add_system("\n".join(result.output))
 
         # 命令输出要求可见，恢复跟随底部。
         self.viewport.scroll_to_bottom()

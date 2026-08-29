@@ -419,6 +419,29 @@ class TuiTestCase(unittest.TestCase):
         asyncio_run(scenario())
 
 
+    def test_layout_mounts_completions_menu(self) -> None:
+        """补全候选必须挂在 FloatContainer 的 CompletionsMenu 上才会显示。"""
+        from prompt_toolkit.layout import CompletionsMenu, FloatContainer
+
+        interface = ContiTui(FakeRuntime(), output=DummyOutput(), input=DummyInput())
+        root = interface.application.layout.container
+        self.assertIsInstance(root, FloatContainer)
+        menus = [f.content for f in root.floats
+                 if isinstance(f.content, CompletionsMenu)]
+        self.assertTrue(menus)
+
+    def test_command_output_grouped_into_one_system_message(self) -> None:
+        interface = ContiTui(FakeRuntime(), output=DummyOutput(), input=DummyInput())
+        before = len([m for m in interface.state.messages if m.role == "system"])
+        asyncio_run(interface.handle_command("/status"))
+        system_messages = [m for m in interface.state.messages if m.role == "system"]
+        # /status 的多行输出合并为一条消息，不再一行一个 SYSTEM 标题。
+        self.assertEqual(len(system_messages), before + 1)
+        latest = system_messages[-1].text
+        self.assertIn("模型：", latest)
+        self.assertIn("会话：", latest)
+
+
 def asyncio_run(awaitable: Any) -> None:
     import asyncio
     asyncio.run(awaitable)
