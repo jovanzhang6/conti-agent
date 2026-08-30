@@ -113,12 +113,15 @@ class Agent:
                 )
             if not decision.allowed:
                 return ToolResult(f"权限拒绝：{decision.reason}", is_error=True)
-            # 危险/越界/受保护操作放行前先打 git 检查点，供 /undo 回滚。
-            if getattr(decision, "checkpoint", False) and self.checkpoint is not None:
-                try:
-                    await self.checkpoint.capture(tool.name)
-                except Exception:
-                    pass
+
+        # 任何写/执行类操作前都打 git 检查点（不止高危操作），
+        # /undo 随时可回滚最近一步。
+        if self.checkpoint is not None and \
+                (tool.effects & {"write", "execute"}):
+            try:
+                await self.checkpoint.capture(tool.name)
+            except Exception:
+                pass
 
         before = None
         if self.hook_engine:

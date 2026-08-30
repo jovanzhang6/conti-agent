@@ -430,9 +430,10 @@ class Runtime:
                         batch_token_budget: int = 12_000) -> int:
         """离线批量提炼：启动时补跑而非守护进程定时。
 
-        游标 = dream_state.json 的 last_dream_at；按文件 mtime 选取晚于
-        游标的会话，跑完全部成功才推进游标，崩溃重跑无害（合并模块按
-        内容去重）。首跑只回溯 7 天；用户输入合计过小的会话跳过。
+        双层游标：全局 last_dream_at（哪天跑过）+ 每会话已消费消息数
+        （消费到哪条）。按 mtime 选出活跃会话后只提炼各会话新增的
+        消息，持续追加中的会话不会重跑全量；提取结果由合并纯函数
+        按内容归一化去重。跑完全部成功才写回游标，崩溃重跑不丢不重。
         返回处理的会话数。
         """
         state_path = self.root / "memory" / "dream_state.json"
@@ -456,6 +457,7 @@ class Runtime:
             (p for p in sessions_dir.glob("*.jsonl") if p.stat().st_mtime > cutoff),
             key=lambda p: p.stat().st_mtime,
         )[-max_sessions:]
+        cursors: dict[str, int] = dict(state.get("sessions") or {})
         index_text = self.memory.index_text()
         processed = 0
         for path in files:
@@ -463,14 +465,17 @@ class Runtime:
                 _, messages = self.sessions.load(path.stem)
             except Exception:
                 continue
+            consumed = int(cursors.get(path.stem, 0))
+            new_messages = messages[min(consumed, len(messages)):]
             user_tokens = sum(
-                estimate_message_tokens([message]) for message in messages
+                estimate_message_tokens([message]) for message in new_messages
                 if message.get("role") == "user"
             )
-            if user_tokens < 500:
-                processed += 1  # 信号量不足：跳过但推进游标
+            if not new_messages or user_tokens < 500:
+                cursors[path.stem] = len(messages)  # 无新内容：推进游标
+                processed += 1
                 continue
-            units = session_to_units(messages)
+            units = session_to_units(new_messages)
             for batch in self._pack_units(units, batch_token_budget):
                 body = "\n\n".join(
                     f"<对话单元 {number}>\n用户：{unit['user']}\n"
@@ -497,14 +502,16 @@ class Runtime:
                         self.memory.load(), findings, source="dream"
                     )
                     self.memory.save(entries)
+            # 游标推进到本轮实际见过的消息数；中途异常向上抛，
+            # 游标不写回，下次从上次消费处继续。
+            cursors[path.stem] = len(messages)
             processed += 1
-        # 全部成功才推进游标；中途异常向上抛，游标不动，下次重跑。
+        # 全部成功才写回游标。
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(
-            json.dumps({"last_dream_at": datetime.now().isoformat()},
-                       ensure_ascii=False),
-            encoding="utf-8",
-        )
+        state["last_dream_at"] = datetime.now().isoformat()
+        state["sessions"] = dict(sorted(cursors.items())[-200:])
+        state_path.write_text(json.dumps(state, ensure_ascii=False),
+                              encoding="utf-8")
         return processed
 
     @staticmethod

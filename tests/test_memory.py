@@ -215,6 +215,10 @@ permission_mode = "workspace"
                 text='[{"action": "new", "section": "用户偏好", '
                      '"statement": "用户偏好 CJK 感知估算"}]',
                 usage=None),
+            ProviderResponse(
+                text='[{"action": "new", "section": "项目事实", '
+                     '"statement": "部署脚本用 bun"}]',
+                usage=None),
         ]))
         store = runtime.sessions
         session_id, _ = store.create(self.root, "dream 会话")
@@ -225,10 +229,18 @@ permission_mode = "workspace"
         entries = runtime.memory.load()
         self.assertEqual(len(entries), 1)
         self.assertIn("CJK", entries[0].statement)
-        # 游标推进：立刻重跑不会再次提炼（mtime 未变且游标已推进）。
+        # 同一会话追加新消息：重跑只提炼增量（第二次模型响应被消费），
+        # 旧消息不重跑。
+        store.append_message(session_id, user_message("追加" * 800))
+        processed = await runtime.run_dream()
+        self.assertEqual(processed, 1)
+        entries = runtime.memory.load()
+        self.assertEqual(len(entries), 2)
+        self.assertIn("bun", entries[1].statement)
+        # 无新消息：会话 mtime 不晚于上次游标，本轮无事可做。
         processed = await runtime.run_dream()
         self.assertEqual(processed, 0)
-        self.assertEqual(len(runtime.memory.load()), 1)
+        self.assertEqual(len(runtime.memory.load()), 2)
 
 
 if __name__ == "__main__":

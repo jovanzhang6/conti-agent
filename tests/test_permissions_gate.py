@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from conti_agent.git_snapshot import CheckpointError, GitCheckpoint
+from conti_agent.messages import ToolCall, user_message
 from conti_agent.permissions import (
     DangerousCommandDetector,
     PathSandbox,
@@ -17,6 +18,7 @@ from conti_agent.permissions import (
     normalize_mode,
     parse_approval,
 )
+from conti_agent.providers import FakeProvider, ProviderResponse
 from conti_agent.tools import Tool, ToolContext
 from conti_agent.workspace import Workspace
 
@@ -193,6 +195,60 @@ class PermissionGateTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.root / "new.txt").read_text(encoding="utf-8"), "later")
         with self.assertRaises(CheckpointError):
             await checkpointer.undo()
+
+    async def test_every_write_tool_captures_checkpoint(self) -> None:
+        """所有写/执行类工具执行前都打检查点（不止高危操作），
+        正常会话随时可 /undo。"""
+        from conti_agent.agent import Agent
+
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=self.root, check=True)
+        (self.root / "seed.txt").write_text("v1", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=self.root, check=True)
+
+        provider = FakeProvider([
+            ProviderResponse(tool_calls=[ToolCall("w1", "write_tool",
+                                                  {"path": "seed.txt",
+                                                   "content": "v2"})]),
+            ProviderResponse(text="done"),
+        ])
+
+        class WriteTool(Tool):
+            name = "write_tool"
+            description = "普通写工具。"
+            parameters = {"type": "object",
+                          "properties": {"path": {"type": "string"},
+                                         "content": {"type": "string"}},
+                          "required": ["path", "content"]}
+            effects = frozenset({"write"})
+
+            async def execute(self, arguments: dict[str, Any],
+                              context: ToolContext) -> Any:
+                target = context.workspace / arguments["path"] \
+                    if not Path(arguments["path"]).is_absolute() \
+                    else Path(arguments["path"])
+                target.write_text(arguments["content"], encoding="utf-8")
+                return None
+
+        from conti_agent.tools import ToolRegistry
+        registry = ToolRegistry()
+        registry.register(WriteTool())
+        checkpointer = GitCheckpoint(self.root)
+        messages = [user_message("写个文件")]
+        agent = Agent(provider, registry,
+                      ToolContext(workspace=self.root, session_id="s"),
+                      checkpoint=checkpointer)
+        async for _ in agent.run(messages):
+            pass
+        # 文件已被改写为 v2；检查点记录了写入前状态，/undo 恢复 v1。
+        self.assertEqual((self.root / "seed.txt").read_text(encoding="utf-8"),
+                         "v2")
+        message = await checkpointer.undo()
+        self.assertIn("已回滚", message)
+        self.assertEqual((self.root / "seed.txt").read_text(encoding="utf-8"),
+                         "v1")
 
     def test_git_checkpoint_outside_repo_is_noop(self) -> None:
         plain = self.root / "plain"
