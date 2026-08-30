@@ -1196,11 +1196,20 @@ class ContiTui:
         # auto dream（可选开启）：启动时后台补跑，提炼结果下个会话生效。
         if getattr(getattr(self.runtime, "config", None), "dream_enabled", False):
             asyncio.create_task(self._run_dream_background())
+        # 团队被动通知：leader 空闲时成员交付/消息立即显示为活动行，
+        # 不打断输入、不启动新回合（用户仍是 leader 的唯一唤醒者）。
+        if hasattr(self.runtime, "on_team_notice"):
+            self.runtime.on_team_notice = self._on_team_notice
         try:
             return await self.application.run_async()
         finally:
             if self.output is None:
                 reset_cursor_shape()
+
+    def _on_team_notice(self, text: str) -> None:
+        self.state.append_tool_activity(f"👥 {text}")
+        self.viewport.scroll_to_bottom()
+        self.invalidate()
 
     async def _run_dream_background(self) -> None:
         try:

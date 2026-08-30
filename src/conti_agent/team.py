@@ -65,6 +65,9 @@ class TeamHub:
         self.wake: dict[str, asyncio.Event] = {LEADER: asyncio.Event()}
         self.seq = 0
         self.message_count = 0
+        # leader 空闲时的被动通知钩子（TUI 注入）：发往 LEADER 的每条
+        # 消息立即回调显示；不启动新回合（唤醒权单向，用户是唯一唤醒者）。
+        self.on_leader_message: Callable[[dict[str, Any]], None] | None = None
 
     # ---------- 持久化 ----------
 
@@ -150,6 +153,11 @@ class TeamHub:
             })
             sent.append(message)
             self._wake(name)
+            if name == LEADER and sender != LEADER and self.on_leader_message:
+                try:
+                    self.on_leader_message(message)
+                except Exception:
+                    pass  # 通知失败不影响投递本身
         self._save_state()
         return sent[0] if sent else {}
 
@@ -285,6 +293,42 @@ class TeamSendTool(Tool):
         if task_id and message.get("to") == LEADER:
             self.hub.complete_task(str(task_id), str(arguments["body"]), self.sender)
         return ToolResult(f"已发送给 {message.get('to', arguments['to'])}")
+
+
+class LeaderSendTool(Tool):
+    """队长的中途指派/纠偏通道：给某个成员或全队发消息。
+
+    与成员版同为空 effects（通信不是资源副作用）；成员若在挂起中
+    会被 hub 唤醒，运行中则在下一个步边界看到。
+    """
+
+    name = "team_send"
+    description = (
+        "给团队成员发消息：新指派、纠偏、补充上下文。to=成员名；"
+        "to=\"*\" 广播全员。成员挂起中会被立即唤醒，运行中在下一个"
+        "工具间隙看到。"
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "to": {"type": "string", "description": "成员名，或 * 广播"},
+            "body": {"type": "string", "description": "消息内容（新任务写清要求）"},
+        },
+        "required": ["to", "body"],
+    }
+    effects = frozenset()
+
+    def __init__(self, runtime: Any) -> None:
+        self.runtime = runtime
+
+    async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
+        team = self.runtime.active_team
+        if team is None:
+            return ToolResult("当前没有运行中的团队。", is_error=True)
+        message = team["hub"].send(LEADER, str(arguments["to"]),
+                                   str(arguments["body"]), type="chat")
+        return ToolResult(f"已发送给 {message.get('to', arguments['to'])}，"
+                          "对方会在下一个工具间隙或被唤醒时看到。")
 
 
 class TeamRunner:

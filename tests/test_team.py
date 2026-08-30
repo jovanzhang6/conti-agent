@@ -11,7 +11,7 @@ from conti_agent.config import load_single
 from conti_agent.messages import ToolCall
 from conti_agent.providers import FakeProvider, ProviderResponse
 from conti_agent.runtime import Runtime
-from conti_agent.team import LEADER, TeamHub, TeamRunner
+from conti_agent.team import LEADER, LeaderSendTool, TeamHub, TeamRunner
 from conti_agent.tools import ToolContext, ToolRegistry
 
 
@@ -74,6 +74,26 @@ class TeamHubTestCase(unittest.IsolatedAsyncioTestCase):
         self.hub.send("scout", "writer", "醒了")
         await task
         self.hub.set_status("writer", "running")
+
+    async def test_leader_idle_notification_callback(self) -> None:
+        """leader 空闲时的被动通知：发往 LEADER 的消息立即回调，
+        投递本身不受回调异常影响。"""
+        notices: list[str] = []
+
+        def on_message(message: dict[str, Any]) -> None:
+            notices.append(f"{message['from']}：{message['body']}")
+            raise RuntimeError("通知挂了也不能影响投递")
+
+        self.hub.on_leader_message = on_message
+        self.hub.send("scout", "leader", "交付内容")
+        self.assertEqual(notices, ["scout：交付内容"])
+        # 消息仍正常入箱。
+        self.assertEqual(len(self.hub.drain(LEADER)), 1)
+        # leader 自己发的消息不触发通知。
+        self.hub.on_leader_message = on_message
+        notices.clear()
+        self.hub.send(LEADER, "scout", "干 live")
+        self.assertEqual(notices, [])
 
 
 class TeamRunnerTestCase(unittest.IsolatedAsyncioTestCase):
@@ -214,6 +234,49 @@ permission_mode = "workspace"
         self.assertIsNone(runtime.active_team)
         # 再查：无团队时静默。
         self.assertIsNone(await runtime._team_inbox())
+
+    def test_leader_send_tool_wakes_and_delivers(self) -> None:
+        """队长 team_send：运行中团队可中途指派/纠偏；无团队时报错。"""
+        async def scenario() -> None:
+            config_path = self.root / "runtime.toml"
+            config_path.write_text(r"""
+[[provider]]
+name = "fake"
+protocol = "fake"
+base_url = "local://fake"
+model = "fake"
+[runtime]
+permission_mode = "workspace"
+""", encoding="utf-8")
+            runtime = Runtime(load_single(config_path), self.root,
+                              output_function=lambda text: None)
+            tool = LeaderSendTool(runtime)
+            # 无团队时拒绝。
+            result = await tool.execute({"to": "w", "body": "x"},
+                                        ToolContext(workspace=self.root))
+            self.assertTrue(result.is_error)
+            # 建队后：消息入成员信箱并触发唤醒事件。
+            hub = TeamHub(self.root / ".conti", team_id="send")
+            hub.open_team([{"name": "w", "profile": "worker"}],
+                          [{"id": "T1", "title": "活", "owner": "w"}])
+            runtime.active_team = {"hub": hub, "finished": asyncio.Event(),
+                                   "summary": ""}
+            hub.set_status("w", "parked")
+
+            async def parker() -> None:
+                self.assertTrue(await hub.wait_wake("w", timeout=2.0))
+
+            task = asyncio.ensure_future(parker())
+            await asyncio.sleep(0)
+            result = await tool.execute({"to": "w", "body": "改成先跑测试"},
+                                        ToolContext(workspace=self.root))
+            await task
+            self.assertIn("已发送给 w", result.output)
+            inbox = hub.drain("w")
+            self.assertEqual(inbox[0]["from"], LEADER)
+            self.assertIn("改成先跑测试", inbox[0]["body"])
+
+        asyncio.run(scenario())
 
     def test_team_status_command(self) -> None:
         config_path = self.root / "runtime.toml"

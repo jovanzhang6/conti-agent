@@ -47,7 +47,7 @@ from .providers import (
 )
 from .sessions import SessionStore
 from .skills import SkillLibrary
-from .team import LEADER, TeamHub, TeamRunner
+from .team import LEADER, LeaderSendTool, TeamHub, TeamRunner
 from .tools import Tool, ToolContext, ToolResult
 from .tools_local import create_local_registry
 from .tools_misc import LoadSkillTool, MemoryWriteTool, RequestInputTool, TaskNoteTool
@@ -188,6 +188,7 @@ class TeamCreateTool(Tool):
         except ToolValidationError as exc:
             return ToolResult(str(exc), is_error=True)
         runtime.active_team = {"hub": hub, "finished": asyncio.Event(), "summary": ""}
+        runtime._notify_team_notice()
 
         async def background() -> None:
             try:
@@ -280,9 +281,12 @@ class Runtime:
         # 团队成员挂起/全队超时（测试与高级用户可调小）。
         self.team_park_timeout = 120.0
         self.team_timeout = 1_800.0
+        # leader 空闲时的被动通知（TUI 注入显示，不启动新回合）。
+        self.on_team_notice: Callable[[str], None] | None = None
         if config.collaboration_enabled:
             self.registry.register(TeamCreateTool(self))
             self.registry.register(TeamCloseTool(self))
+            self.registry.register(LeaderSendTool(self))
         self.permission_checker = PermissionChecker(
             config.runtime.permission_mode,
             workspace=self.workspace,
@@ -342,6 +346,25 @@ class Runtime:
         return await self.checkpoint.undo()
 
     # ---------- Agent Team：队长收件箱与状态（HIGHLIGHTS 亮点 5） ----------
+
+    def _notify_team_notice(self) -> None:
+        """给当前团队挂接被动通知回调（建队时调用）。"""
+        hub = self.active_team["hub"] if self.active_team else None
+        if hub is None:
+            return
+
+        def on_message(message: dict[str, Any]) -> None:
+            if self.on_team_notice is None:
+                return
+            label = ("交付" if message.get("task_id")
+                     else "消息" if message.get("type") == "chat" else "通知")
+            body = str(message.get("body", ""))[:160]
+            try:
+                self.on_team_notice(f"{message['from']} {label}：{body}")
+            except Exception:
+                pass
+
+        hub.on_leader_message = on_message
 
     async def _team_inbox(self) -> str | None:
         """队长的步边界注入：交付/消息/最终报告自动送达对话。"""
