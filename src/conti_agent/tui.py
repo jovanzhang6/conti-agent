@@ -1188,11 +1188,25 @@ class ContiTui:
         self.invalidate_soon()
 
     async def run_async(self) -> str:
+        # auto dream（可选开启）：启动时后台补跑，提炼结果下个会话生效。
+        if getattr(getattr(self.runtime, "config", None), "dream_enabled", False):
+            asyncio.create_task(self._run_dream_background())
         try:
             return await self.application.run_async()
         finally:
             if self.output is None:
                 reset_cursor_shape()
+
+    async def _run_dream_background(self) -> None:
+        try:
+            processed = await self.runtime.run_dream()
+            if processed:
+                self.state.add_system(
+                    f"auto dream 已完成：提炼了 {processed} 个会话的长期记忆"
+                )
+                self.invalidate()
+        except Exception:
+            pass  # dream 是旁路功能，失败不影响正常使用
 
 
 class CommandCompleter(Completer):

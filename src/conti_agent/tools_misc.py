@@ -65,6 +65,58 @@ class TaskNoteTool(Tool):
         return ToolResult("任务笔记已保存", {"count": len(records)})
 
 
+class MemoryWriteTool(Tool):
+    name = "memory_write"
+    description = (
+        "把用户明确要求记住的长期偏好或项目事实写入长期记忆"
+        "（.conti/memory/MEMORY.md，下个会话生效）。只在用户说"
+        "\"记住这个\"之类的明确意图时使用。"
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "statement": {"type": "string", "description": "一句话记忆内容"},
+            "section": {
+                "type": "string",
+                "enum": ["用户偏好", "项目事实", "踩过的坑"],
+                "description": "记忆分区，默认用户偏好",
+            },
+            "matches": {"type": "string",
+                        "description": "与已有记忆同义时填其 id（如 P03）"},
+            "supersedes": {"type": "string",
+                           "description": "用户改主意、需覆盖旧记忆时填其 id"},
+        },
+        "required": ["statement"],
+    }
+    effects = frozenset({"write"})
+
+    def __init__(self, store) -> None:
+        from .memory import MEMORY_SECTIONS
+        self.store = store
+        self._sections = MEMORY_SECTIONS
+
+    async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
+        from .memory import merge_findings
+        statement = str(arguments["statement"]).strip()
+        if not statement:
+            raise ToolValidationError("记忆内容不能为空")
+        finding: dict[str, Any]
+        if arguments.get("supersedes"):
+            finding = {"action": "supersedes", "target": str(arguments["supersedes"]),
+                       "section": arguments.get("section"), "statement": statement}
+        elif arguments.get("matches"):
+            finding = {"action": "matches", "target": str(arguments["matches"]),
+                       "section": arguments.get("section"), "statement": statement}
+        else:
+            finding = {"action": "new", "target": None,
+                       "section": arguments.get("section"), "statement": statement}
+        entries, notes = merge_findings(self.store.load(), [finding], source="manual")
+        self.store.save(entries)
+        detail = "；".join(notes) or "无变化"
+        return ToolResult(f"已写入长期记忆（下个会话生效）：{detail}",
+                          {"memory": notes})
+
+
 class RequestInputTool(Tool):
     name = "request_input"
     description = "向本地用户请求一个澄清答案。可给出 2-4 个预设选项供快速选择，用户也可以自行输入。"

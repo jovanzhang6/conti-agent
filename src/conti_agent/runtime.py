@@ -1,19 +1,34 @@
 from __future__ import annotations
 
 import inspect
+import json
 import sys
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 from .agent import Agent, AgentRunConfig
 from .config import AppConfig, ProviderConfig, load_config
 from .commands import create_default_registry
-from .context import ContextManager, ResultSpiller, default_summary
+from .context import (
+    ContextManager,
+    ResultSpiller,
+    default_summary,
+    estimate_message_tokens,
+)
 from .errors import ConfigurationError, ProviderError
 from .events import AgentEvent, event
 from .external import ExternalToolManager, StdioExternalConnector
 from .git_snapshot import GitCheckpoint
 from .hooks import HookEngine
+from .memory import (
+    MemoryStore,
+    merge_findings,
+    parse_memory_findings,
+    session_to_units,
+    split_section,
+)
 from .messages import user_message
 from .permissions import (
     AuditLogger,
@@ -33,7 +48,7 @@ from .sessions import SessionStore
 from .skills import SkillLibrary
 from .tools import ToolContext
 from .tools_local import create_local_registry
-from .tools_misc import LoadSkillTool, RequestInputTool, TaskNoteTool
+from .tools_misc import LoadSkillTool, MemoryWriteTool, RequestInputTool, TaskNoteTool
 from .workspace import Workspace
 
 
@@ -59,7 +74,7 @@ _COMPACTION_INSTRUCTION = (
     "请把本次请求携带的全部较早历史压缩为一份摘要，作为后续对话延续上下文的唯一依据。\n"
     "要求：\n"
     "1. 输出整体包裹在 <compacted-summary> 与 </compacted-summary> 标签中；\n"
-    "2. 标签内使用且仅使用以下七个 Markdown 小节：\n"
+    "2. 标签内按顺序使用以下七个固定 Markdown 小节：\n"
     "## 目标与约束\n"
     "## 关键决策\n"
     "## 文件与代码\n"
@@ -72,6 +87,23 @@ _COMPACTION_INSTRUCTION = (
     "做增量合并：对话内容与旧摘要冲突时以对话为准，旧摘要中仍相关的信息不得丢失；\n"
     "5. 失败过的尝试只保留一句结论；不要评论、不要提问、不要提及压缩行为本身。"
 )
+
+# 压缩顺带提炼（HIGHLIGHTS 2.3 第二层）：与压缩共用同一次模型调用。
+# 记忆索引只追加在末尾 user 消息里，不影响与主请求的公共前缀。
+_MEMORY_SECTION_HEADING = "值得长期记住的事"
+
+
+def _memory_addon(index_text: str) -> str:
+    lines = [
+        "6. 若较早历史中存在值得长期记住的长期偏好或项目事实（不是一次性的"
+        "任务细节），可在七个固定小节之后追加一节 \"## " + _MEMORY_SECTION_HEADING
+        + "\"，最多 3 行，每行以 [new]、[matches:Pxx] 或 [supersedes:Pxx] 开头"
+        "（new=新记忆，matches=与已有记忆同义，supersedes=覆盖已有记忆）；"
+        "没有可提炼的就写\"无\"。",
+    ]
+    if index_text:
+        lines.append(f"<当前记忆索引>\n{index_text}\n</当前记忆索引>")
+    return "\n".join(lines)
 
 
 def create_provider(provider: ProviderConfig):
@@ -119,6 +151,8 @@ class Runtime:
         # skills_enabled 真实生效：关闭时不注册 load_skill、不注入目录。
         if config.skills_enabled:
             self.registry.register(LoadSkillTool(self.skill_library))
+        self.memory = MemoryStore(self.root)
+        self.registry.register(MemoryWriteTool(self.memory))
         self.registry.register(TaskNoteTool(self.workspace))
         self.registry.register(RequestInputTool(self._dispatch_input))
         self.profile_runner = ProfileRunner(
@@ -186,6 +220,122 @@ class Runtime:
     async def undo_last(self) -> str:
         """回滚到最近的 git 检查点。"""
         return await self.checkpoint.undo()
+
+    # ---------- auto dream（HIGHLIGHTS 2.3 第一层） ----------
+
+    _DREAM_SYSTEM_PROMPT = (
+        "你是记忆提炼器。从对话片段中提炼用户的长期偏好与项目事实"
+        "（编码风格、常用命令、工具习惯、项目约定、踩坑教训），"
+        "忽略一次性的任务细节；只依据明确或强烈暗示的用户表态，宁缺毋滥。"
+    )
+
+    _DREAM_BATCH_HEADER = (
+        '下面是若干对话单元（用户消息 + 相邻助手回复摘要）。提炼其中体现的'
+        '长期偏好/项目事实，输出 JSON 数组（可为空数组 []），每项形如 '
+        '{"action": "new", "section": "用户偏好|项目事实|踩过的坑", '
+        '"statement": "一句话"}。若提供了当前记忆索引，与已有记忆同义时用 '
+        '{"action": "matches", "target": "Pxx"}，用户改主意时用 '
+        '{"action": "supersedes", "target": "Pxx"}。只输出 JSON。'
+    )
+
+    async def run_dream(self, *, max_sessions: int = 20,
+                        batch_token_budget: int = 12_000) -> int:
+        """离线批量提炼：启动时补跑而非守护进程定时。
+
+        游标 = dream_state.json 的 last_dream_at；按文件 mtime 选取晚于
+        游标的会话，跑完全部成功才推进游标，崩溃重跑无害（合并模块按
+        内容去重）。首跑只回溯 7 天；用户输入合计过小的会话跳过。
+        返回处理的会话数。
+        """
+        state_path = self.root / "memory" / "dream_state.json"
+        state: dict[str, Any] = {}
+        if state_path.exists():
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                state = {}
+        cutoff = (datetime.now() - timedelta(days=7)).timestamp()
+        if state.get("last_dream_at"):
+            try:
+                cutoff = datetime.fromisoformat(
+                    str(state["last_dream_at"])).timestamp()
+            except ValueError:
+                pass
+        sessions_dir = self.root / "sessions"
+        if not sessions_dir.exists():
+            return 0
+        files = sorted(
+            (p for p in sessions_dir.glob("*.jsonl") if p.stat().st_mtime > cutoff),
+            key=lambda p: p.stat().st_mtime,
+        )[-max_sessions:]
+        index_text = self.memory.index_text()
+        processed = 0
+        for path in files:
+            try:
+                _, messages = self.sessions.load(path.stem)
+            except Exception:
+                continue
+            user_tokens = sum(
+                estimate_message_tokens([message]) for message in messages
+                if message.get("role") == "user"
+            )
+            if user_tokens < 500:
+                processed += 1  # 信号量不足：跳过但推进游标
+                continue
+            units = session_to_units(messages)
+            for batch in self._pack_units(units, batch_token_budget):
+                body = "\n\n".join(
+                    f"<对话单元 {number}>\n用户：{unit['user']}\n"
+                    f"助手（摘要）：{unit['assistant'] or '（无）'}\n"
+                    f"</对话单元 {number}>"
+                    for number, unit in enumerate(batch, 1)
+                )
+                request = [
+                    {"role": "system", "content": self._DREAM_SYSTEM_PROMPT},
+                    {"role": "user", "content": self._DREAM_BATCH_HEADER
+                     + (f"\n\n<当前记忆索引>\n{index_text}\n</当前记忆索引>"
+                        if index_text else "")
+                     + "\n\n" + body},
+                ]
+                try:
+                    response = await self.provider.complete(
+                        request, self.registry, None, tool_choice="none"
+                    )
+                    findings = parse_memory_findings((response.text or "").strip())
+                except Exception:
+                    continue  # 单批失败不影响其他批次
+                if findings:
+                    entries, _ = merge_findings(
+                        self.memory.load(), findings, source="dream"
+                    )
+                    self.memory.save(entries)
+            processed += 1
+        # 全部成功才推进游标；中途异常向上抛，游标不动，下次重跑。
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps({"last_dream_at": datetime.now().isoformat()},
+                       ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return processed
+
+    @staticmethod
+    def _pack_units(units: list[dict[str, str]],
+                    token_budget: int) -> list[list[dict[str, str]]]:
+        """对话单元按估算 token 装填分批（离线批处理，粗估即可）。"""
+        batches: list[list[dict[str, str]]] = []
+        current: list[dict[str, str]] = []
+        size = 0
+        for unit in units:
+            tokens = (len(unit["user"]) + len(unit["assistant"])) // 3 + 8
+            if current and size + tokens > token_budget:
+                batches.append(current)
+                current, size = [], 0
+            current.append(unit)
+            size += tokens
+        if current:
+            batches.append(current)
+        return batches
 
     def register_extra(self, tool) -> None:
         self.registry.register(tool)
@@ -416,6 +566,18 @@ class Runtime:
                 return ""
             old, tail = split
             summary_text = await self._summarize_old(old)
+            # 压缩顺带提炼：把"值得长期记住的事"小节并入长期记忆。
+            try:
+                section = split_section(summary_text, _MEMORY_SECTION_HEADING)
+                if section and section.strip() != "无":
+                    findings = parse_memory_findings(section)
+                    if findings:
+                        entries, _ = merge_findings(
+                            self.memory.load(), findings, source="compaction"
+                        )
+                        self.memory.save(entries)
+            except Exception:
+                pass  # 记忆提炼失败不影响压缩本身
             extras = ""
             if session_id:
                 extras = (f"[落盘文件目录] {self.result_spiller.directory}\n"
@@ -444,7 +606,9 @@ class Runtime:
         summary_messages: list[dict[str, Any]] = [
             {"role": "system", "content": self._system_prompt()},
             *old,
-            {"role": "user", "content": _COMPACTION_INSTRUCTION},
+            {"role": "user",
+             "content": _COMPACTION_INSTRUCTION
+             + _memory_addon(self.memory.index_text())},
         ]
         try:
             response = await self.provider.complete(
@@ -513,13 +677,16 @@ class Runtime:
             except OSError:
                 custom = ""
         skill_catalog = self._skill_catalog()
+        memory_text = self.memory.inject_text()
         return "\n\n".join([
             "你是 conti-agent，一个谨慎的本地编程助手。"
             "回答保持简洁、可执行；修改文件或执行命令前必须说明将做什么。",
             f"当前工作区：{self.workspace.root}",
             f"权限模式：{self.config.runtime.permission_mode}",
             f"可用工具：{', '.join(self.registry.names())}",
-            "需要用户澄清时调用 request_input；需要持久化任务信息时调用 task_note。",
+            "需要用户澄清时调用 request_input；需要持久化任务信息时调用 task_note；"
+            "用户明确要求记住某事时调用 memory_write。",
             *([skill_catalog] if skill_catalog else []),
+            *([memory_text] if memory_text else []),
             *([f"用户附加指令：\n{custom}"] if custom else []),
         ])

@@ -80,6 +80,8 @@ class AppConfig:
     profiles_enabled: bool = True
     external_tools_enabled: bool = True
     collaboration_enabled: bool = True
+    # auto dream：离线批量提炼用户偏好（成本敏感，默认关闭）。
+    dream_enabled: bool = False
 
 
 def _require(raw: dict[str, Any], key: str, context: str) -> Any:
@@ -167,6 +169,7 @@ def load_single(path: Path) -> AppConfig:
         profiles_enabled=bool(raw.get("extensions", {}).get("profiles", True)),
         external_tools_enabled=bool(raw.get("extensions", {}).get("external_tools", True)),
         collaboration_enabled=bool(raw.get("extensions", {}).get("collaboration", True)),
+        dream_enabled=bool(raw.get("extensions", {}).get("dream", False)),
     )
 
 
@@ -186,7 +189,8 @@ def merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
     base.external_servers.extend(override.external_servers)
     base.runtime = override.runtime if override.runtime != RuntimeConfig() else base.runtime
     for key in ("skills_enabled", "hooks_enabled", "profiles_enabled",
-                "external_tools_enabled", "collaboration_enabled"):
+                "external_tools_enabled", "collaboration_enabled",
+                "dream_enabled"):
         setattr(base, key, getattr(override, key))
     return base
 
