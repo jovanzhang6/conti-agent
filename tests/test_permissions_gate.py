@@ -185,14 +185,15 @@ class PermissionGateTestCase(unittest.IsolatedAsyncioTestCase):
         checkpointer = GitCheckpoint(self.root)
         self.assertIsNotNone(await checkpointer.capture("rm -rf"))
 
-        # 危险操作：删除文件、新建文件。
+        # 危险操作：删除已有文件、新建文件。
         keep.unlink()
         (self.root / "new.txt").write_text("later", encoding="utf-8")
         message = await checkpointer.undo()
         self.assertIn("已回滚", message)
-        # 被删的文件恢复原内容；检查点之后新建的文件保留。
+        # 被删的文件恢复原内容；检查点之后新建的文件被删除。
         self.assertEqual(keep.read_text(encoding="utf-8"), "v1")
-        self.assertEqual((self.root / "new.txt").read_text(encoding="utf-8"), "later")
+        self.assertFalse((self.root / "new.txt").exists())
+        self.assertIn("new.txt", message)
         with self.assertRaises(CheckpointError):
             await checkpointer.undo()
 
@@ -242,13 +243,16 @@ class PermissionGateTestCase(unittest.IsolatedAsyncioTestCase):
                       checkpoint=checkpointer)
         async for _ in agent.run(messages):
             pass
-        # 文件已被改写为 v2；检查点记录了写入前状态，/undo 恢复 v1。
+        # 文件已被改写为 v2；检查点记录了写入前状态，/undo 恢复 v1，
+        # 同时删除检查点之后新建的文件。
+        (self.root / "created-after.txt").write_text("junk", encoding="utf-8")
         self.assertEqual((self.root / "seed.txt").read_text(encoding="utf-8"),
                          "v2")
         message = await checkpointer.undo()
         self.assertIn("已回滚", message)
         self.assertEqual((self.root / "seed.txt").read_text(encoding="utf-8"),
                          "v1")
+        self.assertFalse((self.root / "created-after.txt").exists())
 
     def test_git_checkpoint_outside_repo_is_noop(self) -> None:
         plain = self.root / "plain"

@@ -68,16 +68,22 @@ class GitCheckpoint:
         return entry["id"]
 
     async def undo(self) -> str:
-        """回滚到最近一个检查点。"""
+        """回滚到最近一个检查点：恢复已有文件 + 删除检查点之后新建的
+        未跟踪文件（检查点树是全量快照，树里没有的文件恰为之后新增，
+        不会误伤旧资产；.gitignore 忽略的文件不动）。"""
         checkpoints = self._load()
         if not checkpoints:
             raise CheckpointError("没有可回滚的检查点")
         entry = checkpoints.pop()
         await self._git("read-tree", entry["tree"])
         await self._git("checkout-index", "-a", "-f")
+        # read-tree 后 index 即检查点树：clean 删除树里没有的未跟踪文件。
+        removed = await self._git("clean", "-fd")
         self._save(checkpoints)
-        return (f"已回滚到检查点 {entry['id']}（{entry['label']}）；"
-                f"检查点之后新建的文件不会被删除。")
+        lines = [f"已回滚到检查点 {entry['id']}（{entry['label']}）。"]
+        if removed:
+            lines.append("同时删除了检查点之后新建的文件：\n" + removed)
+        return "\n".join(lines)
 
     def _load(self) -> list[dict]:
         if not self.store_path.exists():
