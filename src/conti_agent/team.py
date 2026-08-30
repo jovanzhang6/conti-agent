@@ -30,7 +30,9 @@ TEAM_PROTOCOL = (
     "3. 收件箱消息会在你每次调用工具之间送达，不会打断你正在执行的步骤。\n"
     "4. 没有可做的事就直接结束回合（挂起）；有新消息或依赖就绪时你会被唤醒，"
     "不要空转，不要重复汇报。\n"
-    "5. 你没有向用户提问的通道，遇到阻塞就在交付/消息里说明。"
+    "5. 你没有向用户提问的工具。需要用户决策时发 "
+    "team_send(to=\"leader\", body=\"需要用户决策：…\"），由 leader 转问用户"
+    "并把答案带回来；在此之前先做不需要决策的部分。"
 )
 
 
@@ -380,7 +382,10 @@ class TeamRunner:
             hub.send(LEADER, LEADER, f"成员 {name} 的 profile 不存在", type="system")
             hub.set_status(name, "failed")
             return
-        tool_names = [t for t in profile.allowed_tools if t != "spawn_task"]
+        # 提问一律走 leader 中继（TEAM_PROTOCOL 第 5 条）：
+        # 成员不持有 request_input，防止绕过 leader 直接打断用户。
+        tool_names = [t for t in profile.allowed_tools
+                      if t not in {"spawn_task", "request_input"}]
         registry = self.base_registry.filter(tool_names)
         registry.register(TeamSendTool(hub, name))
         context = ToolContext(workspace=self.workspace, session_id=session_id,

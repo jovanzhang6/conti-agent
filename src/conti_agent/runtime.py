@@ -387,6 +387,7 @@ class Runtime:
         if team["finished"].is_set():
             lines.append("【团队】已收队，最终报告：\n"
                          + (team["summary"] or hub.final_report()))
+            team["report_delivered"] = True
             self.active_team = None
         elif lines:
             lines.append(hub.board_digest())
@@ -396,6 +397,17 @@ class Runtime:
         if self.active_team is None:
             return "当前没有运行中的团队。"
         return self.active_team["hub"].board_digest()
+
+    def team_needs_leader(self) -> bool:
+        """自动续回合的判据：leader 收件箱有未消费内容，或团队结束
+        报告还没送达过。"""
+        team = self.active_team
+        if team is None:
+            return False
+        hub: TeamHub = team["hub"]
+        if hub.drain(LEADER):
+            return True
+        return team["finished"].is_set() and not team.get("report_delivered")
 
     # ---------- auto dream（HIGHLIGHTS 2.3 第一层） ----------
 
@@ -624,14 +636,20 @@ class Runtime:
         projected = self.context_manager.projected_input_tokens()
         return projected, window, min(100, round(100 * projected / window))
 
-    async def ask(self, prompt: str, *, session_id: str | None = None,
+    async def ask(self, prompt: str | None, *, session_id: str | None = None,
                   output_format: str = "text",
                   text_callback: Callable[[str], None] | None = None,
                   event_callback: Callable[[AgentEvent], None] | None = None) -> tuple[str, str, AsyncIterator[AgentEvent] | list[AgentEvent]]:
-        """执行一次任务；返回 final_text、session_id 和事件集合。"""
+        """执行一次任务；返回 final_text、session_id 和事件集合。
+
+        prompt=None 为团队自动续回合：不追加用户消息，leader 只消费
+        步边界注入的团队收件箱（交付/消息/报告）。
+        """
         self.busy = True
         created = False
         if session_id is None:
+            if prompt is None:
+                raise ConfigurationError("新会话需要一条用户消息")
             session_id, _ = self.sessions.create(
                 self.workspace.root,
                 prompt[:60],
@@ -645,8 +663,9 @@ class Runtime:
             _, messages = self.sessions.load(session_id)
         if created:
             messages = []
-        messages.append(user_message(prompt))
-        self.sessions.append_message(session_id, user_message(prompt))
+        if prompt is not None:
+            messages.append(user_message(prompt))
+            self.sessions.append_message(session_id, user_message(prompt))
         messages.insert(0, {"role": "system", "content": self._system_prompt()})
         events: list[AgentEvent] = []
         context = ToolContext(workspace=self.workspace.root, session_id=session_id,

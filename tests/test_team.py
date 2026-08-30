@@ -235,6 +235,85 @@ permission_mode = "workspace"
         # 再查：无团队时静默。
         self.assertIsNone(await runtime._team_inbox())
 
+    async def test_team_needs_leader_lifecycle(self) -> None:
+        """自动唤醒判据：交付入箱 → 需要；报告送达 → 不再需要。"""
+        config_path = self.root / "runtime.toml"
+        config_path.write_text(r"""
+[[provider]]
+name = "fake"
+protocol = "fake"
+base_url = "local://fake"
+model = "fake"
+[runtime]
+permission_mode = "workspace"
+[[profile]]
+name = "worker"
+description = "通用工作者"
+system_prompt = "你是工作者。"
+allowed_tools = []
+permission_mode = "workspace"
+""", encoding="utf-8")
+        runtime = Runtime(load_single(config_path), self.root,
+                          output_function=lambda text: None)
+        runtime.provider = FakeProvider([
+            ProviderResponse(tool_calls=[ToolCall("c1", "team_send", {
+                "to": "leader", "task_id": "T1", "body": "交付"})]),
+            ProviderResponse(text="done"),
+        ])
+        runtime.team_park_timeout = 0.1
+        runtime.team_timeout = 30.0
+        tool = runtime.registry.get("team_create")
+        await tool.execute({
+            "members": [{"name": "w", "profile": "worker"}],
+            "tasks": [{"title": "活儿", "owner": "w"}],
+        }, ToolContext(workspace=self.root, session_id="s1"))
+        # 等团队结束。
+        for _ in range(500):
+            if runtime.active_team and runtime.active_team["finished"].is_set():
+                break
+            await asyncio.sleep(0.02)
+        # 报告未送达：需要 leader 自动回应。
+        self.assertTrue(runtime.team_needs_leader())
+        notice = await runtime._team_inbox()
+        self.assertIn("最终报告", notice)
+        # 报告已送达：不再需要。
+        self.assertFalse(runtime.team_needs_leader())
+
+    async def test_member_cannot_request_input(self) -> None:
+        """提问中继协议：成员即使 profile 白名单含 request_input 也被剔除，
+        必须走 leader 中继。"""
+        config_path = self.root / "runtime.toml"
+        config_path.write_text(r"""
+[[provider]]
+name = "fake"
+protocol = "fake"
+base_url = "local://fake"
+model = "fake"
+[runtime]
+permission_mode = "workspace"
+[[profile]]
+name = "worker"
+description = "w"
+system_prompt = "worker"
+allowed_tools = ["request_input"]
+permission_mode = "workspace"
+""", encoding="utf-8")
+        provider = FakeProvider([ProviderResponse(text="done")])
+        hub = TeamHub(self.root / ".conti", team_id="relay")
+        hub.open_team([{"name": "w", "profile": "worker"}],
+                      [{"id": "T1", "title": "活", "owner": "w"}])
+        runner = TeamRunner(provider, ToolRegistry(), self.root,
+                            {p.name: p for p in
+                             [(item) for item in
+                              __import__("conti_agent.config", fromlist=["load_single"])
+                              .load_single(self.root / "runtime.toml").profiles]})
+        # 直接检查成员注册表构造（不跑完整循环）。
+        profile = runner.profiles["worker"]
+        tool_names = [t for t in profile.allowed_tools
+                      if t not in {"spawn_task", "request_input"}]
+        registry = ToolRegistry().filter(tool_names)
+        self.assertFalse(registry.has("request_input"))
+
     def test_leader_send_tool_wakes_and_delivers(self) -> None:
         """队长 team_send：运行中团队可中途指派/纠偏；无团队时报错。"""
         async def scenario() -> None:

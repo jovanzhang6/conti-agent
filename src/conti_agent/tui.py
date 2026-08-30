@@ -622,6 +622,7 @@ class ContiTui:
         self._request_input_selected = 0
         self._request_input_message: ChatMessage | None = None
         self.current_task: asyncio.Task | None = None
+        self._auto_turns = 0
         self.command_registry = runtime.commands
         self.command_completer = CommandCompleter(self)
         self.conversation_control = ConversationControl(
@@ -1145,13 +1146,18 @@ class ContiTui:
         from .cli import compact_session
         return await compact_session(self.runtime, session_id)
 
-    async def run_prompt(self, prompt: str) -> None:
-        self.state.append_message("user", prompt)
+    async def run_prompt(self, prompt: str | None = None) -> None:
+        # prompt=None 为团队自动续回合：leader 只消费步边界注入的
+        # 团队收件箱（交付/消息/报告），对话流不出现用户消息。
+        if prompt is not None:
+            self.state.append_message("user", prompt)
+            self._auto_turns = 0  # 用户接管，自动回应计数重置
         # 不再预建占位消息：assistant 消息在实际开始输出时创建
         # （stream_delta），保证与工具活动行保持真实时序。
         self.viewport.scroll_to_bottom()
         self.state.busy = True
-        self.state.status = "AI 正在处理"
+        self.state.status = ("团队成员有新交付，正在回应…"
+                             if prompt is None else "AI 正在处理")
         self.invalidate()
         self.current_task = asyncio.create_task(self._ask_runtime(prompt))
         try:
@@ -1174,8 +1180,26 @@ class ContiTui:
             self.state.busy = False
             self.current_task = None
             self.invalidate()
+        if prompt is None:
+            self._auto_turns += 1
+        # 自动续回合：leader 收件箱还有交付/消息，或最终报告未送达。
+        # 上限防失控（leader 判断失败时不会无限循环）；用户输入随时
+        # 可以接管（Esc 中断本回合后正常输入）。
+        needs_more = False
+        try:
+            needs_more = bool(self.runtime.team_needs_leader())
+        except AttributeError:
+            pass
+        if needs_more and self._auto_turns < self.MAX_AUTO_TURNS:
+            await self.run_prompt(None)
+        elif needs_more:
+            self.state.add_system(
+                f"团队事件较多（自动回应已达 {self.MAX_AUTO_TURNS} 轮上限），"
+                "发送任意消息即可继续接管。")
 
-    async def _ask_runtime(self, prompt: str) -> tuple[str, str, Any]:
+    MAX_AUTO_TURNS = 30
+
+    async def _ask_runtime(self, prompt: str | None) -> tuple[str, str, Any]:
         return await self.runtime.ask(
             prompt,
             session_id=None if self.state.session_id == "新会话" else str(self.state.session_id),
@@ -1210,6 +1234,18 @@ class ContiTui:
         self.state.append_tool_activity(f"👥 {text}")
         self.viewport.scroll_to_bottom()
         self.invalidate()
+        # leader 空闲 → 自动唤醒回应交付/消息；busy 时本轮 run_prompt
+        # 尾部的续杯检查会接手。上限内才自动（防失控循环）。
+        if not self.state.busy and self._auto_turns < self.MAX_AUTO_TURNS:
+            asyncio.create_task(self._auto_follow_up())
+
+    async def _auto_follow_up(self) -> None:
+        try:
+            if self.state.busy or not self.runtime.team_needs_leader():
+                return
+        except AttributeError:
+            return
+        await self.run_prompt(None)
 
     async def _run_dream_background(self) -> None:
         try:
