@@ -140,6 +140,33 @@ class CoreTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["url"], "https://example/v1/chat/completions")
         self.assertEqual(response.tool_calls[0].name, "echo")
 
+    def test_openai_tool_choice_none_keeps_tools_in_payload(self) -> None:
+        """tool_choice="none" 是请求参数、不影响消息前缀；tool schema
+        必须原样保留以命中 KV cache（HIGHLIGHTS 1.3.A）。"""
+        captured: dict[str, Any] = {}
+        def transport(url: str, method: str, headers: dict[str, str], payload: dict[str, Any]):
+            captured["payload"] = payload
+            return {
+                "choices": [{"message": {"content": "摘要"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 4},
+            }
+        provider = OpenAICompatibleProvider(
+            base_url="https://example/v1", model="m", api_key="secret", transport=transport
+        )
+        registry = ToolRegistry()
+        registry.register(EchoTool())
+        async def call():
+            return await provider.complete([user_message("q")], registry,
+                                           tool_choice="none")
+        asyncio.run(call())
+        self.assertEqual(captured["payload"]["tool_choice"], "none")
+        self.assertIn("tools", captured["payload"])
+        # 不传 tool_choice 时 payload 不携带该键（主请求行为不变）。
+        async def call2():
+            return await provider.complete([user_message("q")], registry)
+        asyncio.run(call2())
+        self.assertNotIn("tool_choice", captured["payload"])
+
     def test_openai_stream_request_mapping(self) -> None:
         provider = OpenAICompatibleProvider(
             base_url="https://example/v1", model="m", api_key="secret",

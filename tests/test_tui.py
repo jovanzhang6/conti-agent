@@ -393,6 +393,21 @@ class TuiTestCase(unittest.TestCase):
 
         asyncio_run(scenario())
 
+    def test_prompt_intercepted_while_compacting(self) -> None:
+        """压缩进行中：新输入被拦截并提示，不误发新任务（HIGHLIGHTS 1.3.C）。"""
+
+        async def scenario() -> None:
+            interface = ContiTui(FakeRuntime(), output=DummyOutput(),
+                                 input=DummyInput())
+            interface.runtime.compacting = True
+            before = len(interface.state.messages)
+            await interface.handle_prompt("帮我写个脚本")
+            self.assertIn("正在压缩上下文", interface.state.status)
+            # 没有新消息进入对话流，也没有任务启动。
+            self.assertEqual(len(interface.state.messages), before)
+
+        asyncio_run(scenario())
+
     def test_request_input_tool_supports_async_handler(self) -> None:
         import asyncio
 

@@ -24,7 +24,7 @@ from .providers import (
 )
 from .sessions import SessionStore
 from .skills import SkillLibrary
-from .tools import ToolContext, ToolRegistry
+from .tools import ToolContext
 from .tools_local import create_local_registry
 from .tools_misc import LoadSkillTool, RequestInputTool, TaskNoteTool
 from .workspace import Workspace
@@ -46,11 +46,24 @@ _CONTEXT_OVERFLOW_MARKERS = (
     "超出上下文",
 )
 
-_COMPACT_SYSTEM_PROMPT = (
-    "你是会话压缩器。把较早的对话历史压缩成一份摘要，作为后续对话延续上下文的唯一依据。"
-    "必须保留：用户的目标与约束、已完成的工作、关键结论与决定、涉及或修改过的文件路径、"
-    "当前待办事项、用户的明确偏好。失败过的尝试只保留一句结论。"
-    "不要评论、不要提问，用紧凑的中文分节输出（目标/已完成/结论/文件/待办）。"
+# 压缩指令：作为摘要请求的最后一条 user 消息（前面重放真实 system +
+# 被压缩旧消息原文，与主请求构成公共前缀命中 KV cache——见 HIGHLIGHTS 1.3.A）。
+_COMPACTION_INSTRUCTION = (
+    "请把本次请求携带的全部较早历史压缩为一份摘要，作为后续对话延续上下文的唯一依据。\n"
+    "要求：\n"
+    "1. 输出整体包裹在 <compacted-summary> 与 </compacted-summary> 标签中；\n"
+    "2. 标签内使用且仅使用以下七个 Markdown 小节：\n"
+    "## 目标与约束\n"
+    "## 关键决策\n"
+    "## 文件与代码\n"
+    "## 错误与修复\n"
+    "## 当前进度\n"
+    "## 下一步\n"
+    "## 关键上下文\n"
+    "3. 保留精确信息：文件路径、函数与标识符名、命令、错误信息原文、数值；\n"
+    "4. 若较早历史中已包含带 <compacted-summary> 标签的旧摘要，将其视为前次摘要"
+    "做增量合并：对话内容与旧摘要冲突时以对话为准，旧摘要中仍相关的信息不得丢失；\n"
+    "5. 失败过的尝试只保留一句结论；不要评论、不要提问、不要提及压缩行为本身。"
 )
 
 
@@ -91,6 +104,8 @@ class Runtime:
         self.root = self.workspace.root / ".conti"
         self.provider = create_provider(self.provider_config)
         self.busy = False
+        # 压缩进行中标志：手动 /compact 的拒绝依据，TUI 拦截新输入的依据。
+        self.compacting = False
         self.commands = create_default_registry()
         self.registry = create_local_registry(self.workspace)
         self.skill_library = SkillLibrary(self.root / "skills")
@@ -359,52 +374,54 @@ class Runtime:
         """把较早历史压缩为一条摘要 user 消息，返回摘要文本。
 
         保留约 10K token 的近期原文；切点回退到 user 边界，保证
-        tool_use/tool_result 配对完整。摘要优先由当前模型生成，
-        失败时回退为固定规则摘要。
+        tool_use/tool_result 配对完整。摘要请求重放真实 system 与
+        被压缩旧消息原文（公共前缀命中 KV cache），失败时回退为
+        固定规则摘要。compacting 期间拒绝重入。
         """
-        prefix = [m for m in messages if m.get("role") == "system"]
-        body = [m for m in messages if m.get("role") != "system"]
-        split = self.context_manager.split_for_compaction(body)
-        if split is None:
+        if self.compacting:
             return ""
-        old, tail = split
-        summary_text = await self._summarize_old(old)
-        extras = ""
-        if session_id:
-            extras = (f"[落盘文件目录] {self.result_spiller.directory}\n"
-                      f"[会话记录] {self.root / 'sessions' / f'{session_id}.jsonl'}")
-        summary_message = {
-            "role": "user",
-            "content": "[历史摘要]\n" + summary_text + ("\n" + extras if extras else ""),
-        }
-        messages[:] = [*prefix, summary_message, *tail]
-        # 历史被替换，精确基线失效；退化为估算，下次响应后自动恢复。
-        self.context_manager.invalidate_baseline()
-        if session_id:
-            self.sessions.append_compaction(session_id, summary_text, len(old),
-                                            summary_message=summary_message)
-        return summary_text
+        self.compacting = True
+        try:
+            prefix = [m for m in messages if m.get("role") == "system"]
+            body = [m for m in messages if m.get("role") != "system"]
+            split = self.context_manager.split_for_compaction(body)
+            if split is None:
+                return ""
+            old, tail = split
+            summary_text = await self._summarize_old(old)
+            extras = ""
+            if session_id:
+                extras = (f"[落盘文件目录] {self.result_spiller.directory}\n"
+                          f"[会话记录] {self.root / 'sessions' / f'{session_id}.jsonl'}")
+            summary_message = {
+                "role": "user",
+                "content": "[历史摘要]\n" + summary_text + ("\n" + extras if extras else ""),
+            }
+            messages[:] = [*prefix, summary_message, *tail]
+            # 历史被替换，精确基线失效；退化为估算，下次响应后自动恢复。
+            self.context_manager.invalidate_baseline()
+            if session_id:
+                self.sessions.append_compaction(session_id, summary_text, len(old),
+                                                summary_message=summary_message)
+            return summary_text
+        finally:
+            self.compacting = False
 
     async def _summarize_old(self, old: list[dict[str, Any]]) -> str:
         if not old:
             return "（无可压缩的历史）"
-        transcript: list[str] = []
-        for message in old:
-            content = str(message.get("content") or "")
-            calls = message.get("tool_calls")
-            line = f"[{message.get('role', '?')}] {content}"
-            if calls:
-                names = ", ".join(
-                    call.get("name", "?") if isinstance(call, dict) else call.name
-                    for call in calls
-                )
-                line += f"（调用工具：{names}）"
-            transcript.append(line)
-        prompt = (_COMPACT_SYSTEM_PROMPT + "\n\n<较早历史>\n"
-                  + "\n".join(transcript) + "\n</较早历史>")
+        # 前缀复用（HIGHLIGHTS 1.3.A）：重放真实 system prompt + 被压缩旧
+        # 消息原文（逐字节一致，不做任何序列化改写），压缩指令作为末尾
+        # user 消息——与最近一次主请求构成公共前缀命中服务商 KV cache。
+        # tool schema 原样传入但 tool_choice="none" 禁止摘要模型调工具。
+        summary_messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self._system_prompt()},
+            *old,
+            {"role": "user", "content": _COMPACTION_INSTRUCTION},
+        ]
         try:
             response = await self.provider.complete(
-                [{"role": "user", "content": prompt}], ToolRegistry(), None
+                summary_messages, self.registry, None, tool_choice="none"
             )
             text = (response.text or "").strip()
             if text:

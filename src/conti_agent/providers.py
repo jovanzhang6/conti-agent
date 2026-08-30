@@ -58,7 +58,8 @@ class Provider(ABC):
 
     @abstractmethod
     async def complete(self, messages: list[dict[str, Any]], registry: ToolRegistry,
-                       stream_handler: StreamHandler | None = None) -> ProviderResponse:
+                       stream_handler: StreamHandler | None = None,
+                       tool_choice: str | None = None) -> ProviderResponse:
         raise NotImplementedError
 
 
@@ -70,10 +71,13 @@ class FakeProvider(Provider):
     def __init__(self, responses: list[ProviderResponse]) -> None:
         self.responses = list(responses)
         self.calls: list[list[dict[str, Any]]] = []
+        self.tool_choices: list[str | None] = []
 
     async def complete(self, messages: list[dict[str, Any]], registry: ToolRegistry,
-                       stream_handler: StreamHandler | None = None) -> ProviderResponse:
+                       stream_handler: StreamHandler | None = None,
+                       tool_choice: str | None = None) -> ProviderResponse:
         self.calls.append([dict(message) for message in messages])
+        self.tool_choices.append(tool_choice)
         if not self.responses:
             raise AssertionError("FakeProvider received more calls than configured")
         response = self.responses.pop(0)
@@ -174,7 +178,8 @@ class OpenAICompatibleProvider(Provider):
         return converted
 
     async def complete(self, messages: list[dict[str, Any]], registry: ToolRegistry,
-                       stream_handler: StreamHandler | None = None) -> ProviderResponse:
+                       stream_handler: StreamHandler | None = None,
+                       tool_choice: str | None = None) -> ProviderResponse:
         payload = {
             "model": self.model,
             "messages": self._convert_messages(messages),
@@ -183,6 +188,10 @@ class OpenAICompatibleProvider(Provider):
         tools = self._convert_tools(registry)
         if tools:
             payload["tools"] = tools
+        # tool_choice 是请求参数、不属于消息前缀：schema 原样保留以维持
+        # 与主请求的公共前缀（KV cache），"none" 仅禁止本次实际调用工具。
+        if tool_choice is not None and tools:
+            payload["tool_choice"] = tool_choice
         self._tool_names_by_wire = {
             _wire_tool_name(tool.name): tool.name for tool in registry.all()
         }
@@ -359,7 +368,8 @@ class AnthropicCompatibleProvider(Provider):
         return "\n\n".join(system_parts), converted
 
     async def complete(self, messages: list[dict[str, Any]], registry: ToolRegistry,
-                       stream_handler: StreamHandler | None = None) -> ProviderResponse:
+                       stream_handler: StreamHandler | None = None,
+                       tool_choice: str | None = None) -> ProviderResponse:
         system, converted = self._convert_messages(messages)
         payload: dict[str, Any] = {
             "model": self.model,
@@ -368,16 +378,21 @@ class AnthropicCompatibleProvider(Provider):
         }
         if system:
             payload["system"] = system
-        tools = [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": tool.parameters,
-            }
-            for tool in registry.all()
-        ]
-        if tools:
-            payload["tools"] = tools
+        # Anthropic 的 tool_choice 不支持 "none"：摘要请求省略工具字段，
+        # 功能上同样禁止工具调用（与旧版空 registry 行为一致），不劣化现状。
+        if tool_choice == "none":
+            pass
+        else:
+            tools = [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.parameters,
+                }
+                for tool in registry.all()
+            ]
+            if tools:
+                payload["tools"] = tools
         headers = {
             "Content-Type": "application/json",
             "x-api-key": self.api_key,

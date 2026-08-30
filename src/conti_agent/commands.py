@@ -227,6 +227,13 @@ def create_default_registry() -> CommandRegistry:
             return CommandResult(["当前还没有可压缩的磁盘会话。"], status="error")
         if context.compact_session is None:
             return CommandResult(["当前界面不支持压缩会话。"], status="error")
+        # 压缩锁：任务运行中（busy）或已有压缩进行中时拒绝，防止
+        # 压缩标记吞掉摘要期间新写入的消息（HIGHLIGHTS 1.3.C）。
+        if getattr(context.runtime, "busy", False) or \
+                getattr(context.runtime, "compacting", False):
+            return CommandResult(
+                ["当前有任务或压缩正在进行，请稍后再试 /compact。"], status="error"
+            )
         summary = await context.compact_session(context.session_id)
         return CommandResult([f"历史已压缩。摘要字数：{len(summary)}。"])
 

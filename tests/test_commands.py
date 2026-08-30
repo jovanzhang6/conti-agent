@@ -116,6 +116,32 @@ class CommandTestCase(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("运行中", result.output[0])
 
+    def test_compact_rejected_when_busy_or_compacting(self) -> None:
+        """压缩锁：busy 或 compacting 时 /compact 直接拒绝（HIGHLIGHTS 1.3.C）。"""
+        registry = create_default_registry()
+        runtime = FakeRuntime()
+        runtime.compacting = False
+        called: list[str] = []
+
+        async def fake_compact(session_id: str) -> str:
+            called.append(session_id)
+            return "摘要"
+
+        context = CommandContext(runtime, session_id="abc",
+                                 compact_session=fake_compact)
+        result = asyncio.run(registry.execute("/compact", context))
+        self.assertTrue(result.ok)
+        runtime.busy = True
+        result = asyncio.run(registry.execute("/compact", context))
+        self.assertFalse(result.ok)
+        self.assertIn("运行中", result.output[0])
+        runtime.busy = False
+        runtime.compacting = True
+        result = asyncio.run(registry.execute("/compact", context))
+        self.assertFalse(result.ok)
+        self.assertIn("稍后", result.output[0])
+        self.assertEqual(called, ["abc"])
+
     def test_unknown_command_and_missing_argument(self) -> None:
         registry = create_default_registry()
         context = CommandContext(FakeRuntime())

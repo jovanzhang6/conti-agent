@@ -448,18 +448,28 @@ permission_mode = "workspace"
         self.assertEqual(final, "done")
         self.assertEqual(runtime.provider.calls, 2)
 
-    async def test_compact_messages_uses_model_summary(self) -> None:
+    async def test_compact_messages_replays_prefix_for_cache(self) -> None:
+        """摘要请求重放真实 system + 被压缩旧消息原文 + 末尾压缩指令，
+        tool schema 原样传入且 tool_choice=none（HIGHLIGHTS 1.3.A/B）。"""
         from conti_agent.config import load_single
         from conti_agent.providers import ProviderResponse
         from conti_agent.runtime import Runtime
 
         class ScriptedProvider:
             def __init__(self) -> None:
-                self.prompts: list[str] = []
+                self.calls: list[list[dict[str, Any]]] = []
+                self.tool_choices: list[str | None] = []
+                self.registries: list[Any] = []
 
-            async def complete(self, messages, registry, stream):
-                self.prompts.append(messages[-1]["content"])
-                return ProviderResponse(text="模型摘要：目标A；结论B", usage=None)
+            async def complete(self, messages, registry, stream_handler=None,
+                               tool_choice=None):
+                self.calls.append([dict(message) for message in messages])
+                self.tool_choices.append(tool_choice)
+                self.registries.append(registry)
+                return ProviderResponse(
+                    text="<compacted-summary>\n## 目标与约束\n压缩目标A\n</compacted-summary>",
+                    usage=None,
+                )
 
         config_path = self.root / "runtime.toml"
         config_path.write_text(r"""
@@ -475,19 +485,79 @@ permission_mode = "workspace"
                           output_function=lambda text: None)
         provider = ScriptedProvider()
         runtime.provider = provider
+        system_prompt = runtime._system_prompt()
         long = "y" * 400
         messages = [
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": "目标A " + long},
             {"role": "assistant", "content": "结论B " + long},
             {"role": "user", "content": "u2 " + long},
             {"role": "assistant", "content": "a2"},
         ]
-        await runtime.compact_messages(messages, None, reason="manual")
-        # 摘要请求发给了模型，压缩结果以 user 摘要消息打头。
-        self.assertTrue(any("压缩器" in p for p in provider.prompts))
-        self.assertEqual(messages[0]["role"], "user")
-        self.assertIn("模型摘要：目标A；结论B", messages[0]["content"])
+        summary = await runtime.compact_messages(messages, None, reason="manual")
+        # 前缀一致性：system 与旧消息逐字节重放，压缩指令是末尾 user 消息。
+        sent = provider.calls[0]
+        self.assertEqual(sent[0], {"role": "system", "content": system_prompt})
+        self.assertEqual(sent[1], {"role": "user", "content": "目标A " + long})
+        self.assertEqual(sent[2], {"role": "assistant", "content": "结论B " + long})
+        self.assertEqual(sent[-1]["role"], "user")
+        self.assertIn("压缩为一份摘要", sent[-1]["content"])
+        # 结构化模板七节 + <compacted-summary> 标签 + 增量合并规则。
+        for section in ("## 目标与约束", "## 关键决策", "## 文件与代码",
+                        "## 错误与修复", "## 当前进度", "## 下一步", "## 关键上下文"):
+            self.assertIn(section, sent[-1]["content"])
+        self.assertIn("<compacted-summary>", sent[-1]["content"])
+        self.assertIn("增量合并", sent[-1]["content"])
+        # tool schema 原样传入，tool_choice="none"。
+        self.assertIs(provider.registries[0], runtime.registry)
+        self.assertEqual(provider.tool_choices, ["none"])
+        # 对话重组：system 保留，摘要 user 消息紧随其后，近期原文保留。
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertEqual(messages[1]["role"], "user")
+        self.assertIn("<compacted-summary>", messages[1]["content"])
+        self.assertIn("压缩目标A", summary)
         self.assertIn("u2 " + long, messages[-2]["content"])
+
+    async def test_compact_lock_rejects_reentry(self) -> None:
+        """compacting 期间 compact_messages 直接返回空，不重入。"""
+        from conti_agent.config import load_single
+        from conti_agent.runtime import Runtime
+        config_path = self.root / "runtime.toml"
+        config_path.write_text(r"""
+[[provider]]
+name = "fake"
+protocol = "fake"
+base_url = "local://fake"
+model = "fake"
+[runtime]
+permission_mode = "workspace"
+""", encoding="utf-8")
+        runtime = Runtime(load_single(config_path), self.root,
+                          output_function=lambda text: None)
+        runtime.compacting = True
+        messages = [
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+        ]
+        self.assertEqual(await runtime.compact_messages(messages, None), "")
+        # 锁不吞对话：消息列表原样未动。
+        self.assertEqual(len(messages), 3)
+        # 正常路径结束后锁必须释放（try/finally）。
+        runtime.compacting = False
+        provider_calls: list[list[dict[str, Any]]] = []
+
+        class TinyProvider:
+            async def complete(self, messages, registry, stream_handler=None,
+                               tool_choice=None):
+                provider_calls.append(list(messages))
+                from conti_agent.providers import ProviderResponse
+                return ProviderResponse(text="摘要", usage=None)
+
+        runtime.provider = TinyProvider()
+        await runtime.compact_messages(messages, None)
+        self.assertFalse(runtime.compacting)
+        self.assertTrue(provider_calls)
 
 
 if __name__ == "__main__":

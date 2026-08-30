@@ -1028,6 +1028,12 @@ class ContiTui:
             self.state.status = "当前任务仍在运行，请等待或 Ctrl+C 取消"
             self.invalidate()
             return
+        # 压缩锁：压缩进行中拦截新输入，防止压缩标记吞掉摘要期间
+        # 新写入的对话（HIGHLIGHTS 1.3.C）。
+        if getattr(self.runtime, "compacting", False):
+            self.state.status = "正在压缩上下文，请稍候再发送"
+            self.invalidate()
+            return
         await self.run_prompt(prompt)
 
     async def _answer_request_input(self, question: str,
