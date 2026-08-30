@@ -30,7 +30,8 @@ class Agent:
                  auditor: AuditLogger | None = None,
                  session_store=None, session_id: str = "",
                  hook_engine=None, result_spiller=None,
-                 usage_observer=None, pre_request_hook=None) -> None:
+                 usage_observer=None, pre_request_hook=None,
+                 checkpoint=None) -> None:
         self.provider = provider
         self.registry = registry
         self.context = context
@@ -41,6 +42,8 @@ class Agent:
         self.session_id = session_id
         self.hook_engine = hook_engine
         self.result_spiller = result_spiller
+        # git 检查点管理器：危险/越界/受保护操作放行前先打检查点。
+        self.checkpoint = checkpoint
         # 每次响应到达时同步记录精确用量与覆盖的消息条数。
         self.usage_observer = usage_observer
         # 每次向模型发请求之前调用：做上下文投影检查，超限就压缩。
@@ -97,8 +100,22 @@ class Agent:
                 )
             emit(event("tool.approved", tool_call_id=call.id,
                        decision="allowed" if decision.allowed else "denied"))
+            if self.session_store and self.session_id:
+                self.session_store.append_event(
+                    self.session_id, "permission.decided",
+                    tool=tool.name,
+                    allowed=decision.allowed,
+                    reason=decision.reason,
+                    source=decision.source,
+                )
             if not decision.allowed:
                 return ToolResult(f"权限拒绝：{decision.reason}", is_error=True)
+            # 危险/越界/受保护操作放行前先打 git 检查点，供 /undo 回滚。
+            if getattr(decision, "checkpoint", False) and self.checkpoint is not None:
+                try:
+                    await self.checkpoint.capture(tool.name)
+                except Exception:
+                    pass
 
         before = None
         if self.hook_engine:

@@ -40,6 +40,7 @@ class CommandContext:
     session_id: str | None = None
     compact_session: Callable[[str], Awaitable[str]] | None = None
     activity_provider: Callable[[], list[str]] | None = None
+    undo_checkpoint: Callable[[], Awaitable[str]] | None = None
 
 
 @dataclass(frozen=True)
@@ -250,6 +251,34 @@ def create_default_registry() -> CommandRegistry:
     def exit_handler(context: CommandContext, arguments: list[str]) -> CommandResult:
         return CommandResult(["再见。"], exit_requested=True)
 
+    def permission_handler(context: CommandContext, arguments: list[str]) -> CommandResult:
+        """查看或切换权限档位（read_only / workspace / trusted）。"""
+        set_mode = getattr(context.runtime, "set_permission_mode", None)
+        get_mode = getattr(context.runtime, "get_permission_mode", None)
+        if not callable(set_mode) or not callable(get_mode):
+            return CommandResult(["当前界面不支持切换权限档位。"], status="error")
+        if not arguments:
+            return CommandResult([
+                f"当前权限档位：{get_mode()}"
+                "（用 /permission <档位> 切换：read_only 只读 / workspace 标准 / trusted 放行）"
+            ])
+        try:
+            normalized = set_mode(arguments[0])
+        except Exception as exc:
+            return CommandResult([f"切换失败：{exc}"], status="error")
+        return CommandResult([f"权限档位已切换：{normalized}"])
+
+    async def undo_handler(context: CommandContext, arguments: list[str]) -> CommandResult:
+        """回滚到最近的 git 检查点（危险操作前自动打的快照）。"""
+        undo = context.undo_checkpoint
+        if undo is None:
+            return CommandResult(["当前界面不支持回滚。"], status="error")
+        try:
+            message = await undo()
+        except Exception as exc:
+            return CommandResult([f"回滚失败：{exc}"], status="error")
+        return CommandResult([message])
+
     commands = (
         (CommandSpec("help", "显示命令帮助", "/help"), help_handler),
         (CommandSpec("models", "列出可用模型", "/models"), models_handler),
@@ -258,6 +287,8 @@ def create_default_registry() -> CommandRegistry:
         (CommandSpec("sessions", "列出保存的会话", "/sessions"), sessions_handler),
         (CommandSpec("resume", "恢复会话", "/resume <session-id>", ("session-id",), True), resume_handler),
         (CommandSpec("compact", "压缩当前历史", "/compact", (), True), compact_handler),
+        (CommandSpec("permission", "查看/切换权限档位", "/permission [mode]"), permission_handler),
+        (CommandSpec("undo", "回滚到最近的 git 检查点", "/undo", (), True), undo_handler),
         (CommandSpec("new", "开启新会话", "/new", (), True), new_handler),
         (CommandSpec("activity", "查看完整活动", "/activity"), activity_handler),
         (CommandSpec("panel", "切换状态面板", "/panel"), panel_handler),

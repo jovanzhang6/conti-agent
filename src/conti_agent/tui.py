@@ -642,6 +642,7 @@ class ContiTui:
             self.runtime,
             session_id=str(session_id) if session_id is not None else None,
             compact_session=self._compact_session,
+            undo_checkpoint=getattr(self.runtime, "undo_last", None),
             activity_provider=lambda: [m.text for m in self.state.messages
                                        if m.role == "activity"][-20:],
         )

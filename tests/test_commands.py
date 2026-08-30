@@ -12,6 +12,7 @@ class FakeRuntime:
         self.commands = create_default_registry()
         self.provider_names = ["one", "two"]
         self.active_name = "one"
+        self.mode = "workspace"
         self.switch_session_ids: list[str | None] = []
         self.history: dict[str, list[dict]] = {
             "abc": [
@@ -20,6 +21,14 @@ class FakeRuntime:
                 {"role": "tool", "content": "工具输出"},
             ],
         }
+
+    def get_permission_mode(self) -> str:
+        return self.mode
+
+    def set_permission_mode(self, mode: str) -> str:
+        from conti_agent.permissions import normalize_mode
+        self.mode = normalize_mode(mode)
+        return self.mode
 
     def describe(self):
         return {"provider": self.active_name, "permission_mode": "workspace"}
@@ -141,6 +150,38 @@ class CommandTestCase(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("稍后", result.output[0])
         self.assertEqual(called, ["abc"])
+
+    def test_permission_view_and_switch(self) -> None:
+        registry = create_default_registry()
+        runtime = FakeRuntime()
+        context = CommandContext(runtime)
+        result = asyncio.run(registry.execute("/permission", context))
+        self.assertTrue(result.ok)
+        self.assertIn("workspace", result.output[0])
+        result = asyncio.run(registry.execute("/permission trusted", context))
+        self.assertTrue(result.ok)
+        self.assertEqual(runtime.mode, "trusted")
+        result = asyncio.run(registry.execute("/permission nonsense", context))
+        self.assertFalse(result.ok)
+
+    def test_undo_command(self) -> None:
+        registry = create_default_registry()
+        context = CommandContext(FakeRuntime())
+        result = asyncio.run(registry.execute("/undo", context))
+        self.assertFalse(result.ok)
+        self.assertIn("不支持", result.output[0])
+
+        undone: list[bool] = []
+
+        async def fake_undo() -> str:
+            undone.append(True)
+            return "已回滚到检查点 cp-x"
+
+        context = CommandContext(FakeRuntime(), undo_checkpoint=fake_undo)
+        result = asyncio.run(registry.execute("/undo", context))
+        self.assertTrue(result.ok)
+        self.assertIn("已回滚", result.output[0])
+        self.assertEqual(undone, [True])
 
     def test_unknown_command_and_missing_argument(self) -> None:
         registry = create_default_registry()

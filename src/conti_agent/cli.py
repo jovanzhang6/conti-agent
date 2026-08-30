@@ -56,6 +56,7 @@ async def run_chat(runtime: Runtime, session_id: str | None,
                 runtime,
                 session_id=session_id,
                 compact_session=lambda sid: compact_session(runtime, sid),
+                undo_checkpoint=runtime.undo_last,
             )
             result = await runtime.commands.execute(prompt, context)
             for line in result.output:

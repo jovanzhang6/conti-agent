@@ -63,6 +63,7 @@ class SafetyStateTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(DangerousCommandDetector().inspect({"command": ["python", "--version"]}))
 
     async def test_rule_precedence_and_audit(self) -> None:
+        """规则 last-match-wins：高优先级文件的窄规则覆盖低优先级宽规则。"""
         project = self.root / ".conti" / "permissions.toml"
         local = self.root / ".conti" / "permissions.local.toml"
         project.parent.mkdir(parents=True)
@@ -70,13 +71,13 @@ class SafetyStateTestCase(unittest.IsolatedAsyncioTestCase):
 [[rule]]
 tool = "workspace_write"
 decision = "allow"
-pattern = '\.allowed$'
+pattern = 'a.allowed'
 """, encoding="utf-8")
         local.write_text(r"""
 [[rule]]
 tool = "workspace_write"
 decision = "deny"
-pattern = '\.allowed$'
+pattern = 'a.allowed'
 """, encoding="utf-8")
         audit_path = self.root / ".conti" / "runtime" / "audit.jsonl"
         checker = PermissionChecker(
@@ -92,12 +93,14 @@ pattern = '\.allowed$'
         self.assertIn('"event": "denied"', audit_path.read_text(encoding="utf-8"))
         self.assertNotIn("secret", audit_path.read_text(encoding="utf-8"))
 
-    async def test_approved_mode_uses_approver_once(self) -> None:
+    async def test_read_only_write_asks_and_always_caches(self) -> None:
+        """只读档写操作走审批；always 答复按工具缓存本会话有效。"""
         calls: list[str] = []
-        async def approve(key: str, arguments: dict[str, Any], reason: str) -> bool:
+        async def approve(key: str, arguments: dict[str, Any], reason: str) -> str:
             calls.append(key)
-            return True
-        checker = PermissionChecker("approved", workspace=self.workspace, approver=approve)
+            return "always"
+        checker = PermissionChecker("read_only", workspace=self.workspace,
+                                    approver=approve)
         tool = WriteTool()
         first = await checker.check(tool, {"path": "a.txt", "content": "x"}, self.context)
         second = await checker.check(tool, {"path": "b.txt", "content": "x"}, self.context)

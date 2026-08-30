@@ -12,9 +12,16 @@ from .context import ContextManager, ResultSpiller, default_summary
 from .errors import ConfigurationError, ProviderError
 from .events import AgentEvent, event
 from .external import ExternalToolManager, StdioExternalConnector
+from .git_snapshot import GitCheckpoint
 from .hooks import HookEngine
 from .messages import user_message
-from .permissions import AuditLogger, PermissionChecker, PermissionMode
+from .permissions import (
+    AuditLogger,
+    PermissionChecker,
+    PermissionMode,
+    normalize_mode,
+    parse_approval,
+)
 from .profiles import ProfileRunner, SpawnTaskTool
 from .providers import (
     AnthropicCompatibleProvider,
@@ -128,6 +135,7 @@ class Runtime:
         self.hook_engine = HookEngine(config.hooks, config.hooks_enabled)
         self.external_managers: list[ExternalToolManager] = []
         self.auditor = AuditLogger(self.root / "runtime" / "audit.jsonl")
+        self.checkpoint = GitCheckpoint(self.workspace.root)
         self.sessions = SessionStore(self.root)
         self.result_spiller = ResultSpiller(self.root / "spill")
         schema_tokens = sum(len(str(tool.parameters)) // 4 for tool in self.registry.all())
@@ -154,12 +162,28 @@ class Runtime:
                         + "\n（输入编号或直接输入你的回答）")
         return self.input_function(question)
 
-    async def _approve(self, key: str, arguments: dict[str, Any], reason: str) -> bool:
-        """默认交互式批准入口；服务模式可注入显式批准策略。"""
-        answer = self._dispatch_input(f"需要批准：{reason}（yes/no）")
+    async def _approve(self, key: str, arguments: dict[str, Any], reason: str) -> str:
+        """三选项审批入口（允许一次/本会话都允许/拒绝）；服务模式可注入。"""
+        answer = self._dispatch_input(
+            f"需要批准：{reason}", ["允许一次", "本次会话都允许", "拒绝"]
+        )
         if inspect.isawaitable(answer):
             answer = await answer
-        return answer.strip().lower() in {"y", "yes"}
+        return parse_approval(str(answer))
+
+    def get_permission_mode(self) -> str:
+        return self.config.runtime.permission_mode
+
+    def set_permission_mode(self, mode: str) -> str:
+        """切换权限档位（接受历史别名）；切换立即生效。"""
+        normalized = normalize_mode(mode)
+        self.config.runtime.permission_mode = normalized
+        self.permission_checker.mode = PermissionMode(normalized)
+        return normalized
+
+    async def undo_last(self) -> str:
+        """回滚到最近的 git 检查点。"""
+        return await self.checkpoint.undo()
 
     def register_extra(self, tool) -> None:
         self.registry.register(tool)
@@ -329,6 +353,7 @@ class Runtime:
                 result_spiller=self.result_spiller,
                 usage_observer=observe_usage,
                 pre_request_hook=pre_request,
+                checkpoint=self.checkpoint,
             )
             try:
                 async for item in agent.run(messages):
