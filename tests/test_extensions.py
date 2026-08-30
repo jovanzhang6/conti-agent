@@ -191,6 +191,68 @@ version = 1
         self.assertEqual(result.output, "found")
         self.assertIn("tools/call", [item[0] for item in connector.calls])
 
+    def _skill_runtime(self, skills_enabled: bool = True):
+        """构造带可选 skill 开关的 Runtime，并预置一个 release skill。"""
+        from conti_agent.runtime import Runtime
+        directory = self.root / ".conti" / "skills"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "release.md").write_text(
+            '---\nname = "release"\ndescription = "发布检查清单"\n'
+            'keywords = ["release"]\nversion = 1\n---\n\n1. 运行测试\n',
+            encoding="utf-8",
+        )
+        config_path = self.root / "runtime.toml"
+        config_path.write_text(f"""
+[[provider]]
+name = "fake"
+protocol = "fake"
+base_url = "local://fake"
+model = "fake"
+[runtime]
+permission_mode = "workspace"
+[extensions]
+skills = {str(skills_enabled).lower()}
+""", encoding="utf-8")
+        return Runtime(load_single(config_path), self.root,
+                       output_function=lambda text: None)
+
+    def test_skill_catalog_injected_into_system_prompt(self) -> None:
+        runtime = self._skill_runtime()
+        prompt = runtime._system_prompt()
+        self.assertIn("release", prompt)
+        self.assertIn("发布检查清单", prompt)
+        self.assertIn("load_skill", prompt)
+        self.assertIn("load_skill", runtime.registry.names())
+
+    def test_skills_disabled_skips_registration_and_injection(self) -> None:
+        runtime = self._skill_runtime(skills_enabled=False)
+        self.assertNotIn("load_skill", runtime.registry.names())
+        self.assertNotIn("已安装 Skill", runtime._system_prompt())
+        self.assertNotIn("release", runtime._system_prompt())
+
+    def test_skill_catalog_truncated_to_budget(self) -> None:
+        runtime = self._skill_runtime()
+        # 塞入超预算的长描述，验证截断标记。
+        directory = self.root / ".conti" / "skills"
+        for index in range(10):
+            (directory / f"bulk{index}.md").write_text(
+                '---\nname = "bulk' + str(index) + '"\ndescription = "长'
+                + "描" * 400 + '"\nversion = 1\n---\n\n正文\n',
+                encoding="utf-8",
+            )
+        prompt = runtime._system_prompt()
+        self.assertIn("已截断", prompt)
+
+    def test_skills_command_lists_library(self) -> None:
+        import asyncio
+        from conti_agent.commands import CommandContext, create_default_registry
+        runtime = self._skill_runtime()
+        registry = create_default_registry()
+        result = asyncio.run(
+            registry.execute("/skills", CommandContext(runtime)))
+        self.assertTrue(result.ok)
+        self.assertIn("release：发布检查清单", "\n".join(result.output))
+
 
 if __name__ == "__main__":
     unittest.main()

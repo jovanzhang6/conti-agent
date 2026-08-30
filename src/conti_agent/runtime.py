@@ -116,7 +116,9 @@ class Runtime:
         self.commands = create_default_registry()
         self.registry = create_local_registry(self.workspace)
         self.skill_library = SkillLibrary(self.root / "skills")
-        self.registry.register(LoadSkillTool(self.skill_library))
+        # skills_enabled 真实生效：关闭时不注册 load_skill、不注入目录。
+        if config.skills_enabled:
+            self.registry.register(LoadSkillTool(self.skill_library))
         self.registry.register(TaskNoteTool(self.workspace))
         self.registry.register(RequestInputTool(self._dispatch_input))
         self.profile_runner = ProfileRunner(
@@ -478,6 +480,29 @@ class Runtime:
             await manager.close()
         self.external_managers.clear()
 
+    def _skill_catalog(self) -> str:
+        """已安装 Skill 的名称+描述清单（HIGHLIGHTS 4.2）。
+
+        注入 system prompt 让模型知道有哪些技能可用；带截断预算，
+        且内容稳定以保护前缀 KV cache。
+        """
+        if not self.config.skills_enabled:
+            return ""
+        try:
+            skills = self.skill_library.discover()
+        except Exception:
+            return ""
+        if not skills:
+            return ""
+        lines = [f"- {skill.name}：{skill.description}" for skill in skills]
+        catalog = "\n".join(lines)
+        if len(catalog) > self._SKILL_CATALOG_BUDGET:
+            catalog = catalog[:self._SKILL_CATALOG_BUDGET] + "\n…（已截断）"
+        return ("已安装 Skill（用户提到相关任务时，用 load_skill 按名称加载"
+                "完整正文）：\n" + catalog)
+
+    _SKILL_CATALOG_BUDGET = 2_000
+
     def _system_prompt(self) -> str:
         """为真实模型生成稳定的行为边界和当前工作区信息。"""
         instruction_path = self.root / "memory" / "instructions.md"
@@ -487,6 +512,7 @@ class Runtime:
                 custom = instruction_path.read_text(encoding="utf-8").strip()
             except OSError:
                 custom = ""
+        skill_catalog = self._skill_catalog()
         return "\n\n".join([
             "你是 conti-agent，一个谨慎的本地编程助手。"
             "回答保持简洁、可执行；修改文件或执行命令前必须说明将做什么。",
@@ -494,5 +520,6 @@ class Runtime:
             f"权限模式：{self.config.runtime.permission_mode}",
             f"可用工具：{', '.join(self.registry.names())}",
             "需要用户澄清时调用 request_input；需要持久化任务信息时调用 task_note。",
+            *([skill_catalog] if skill_catalog else []),
             *([f"用户附加指令：\n{custom}"] if custom else []),
         ])

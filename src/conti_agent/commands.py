@@ -279,6 +279,16 @@ def create_default_registry() -> CommandRegistry:
             return CommandResult([f"回滚失败：{exc}"], status="error")
         return CommandResult([message])
 
+    def skills_handler(context: CommandContext, arguments: list[str]) -> CommandResult:
+        """列出已安装 Skill 与描述。"""
+        library = getattr(context.runtime, "skill_library", None)
+        if library is None:
+            return CommandResult(["当前环境没有 Skill 库。"], status="error")
+        skills = library.discover()
+        if not skills:
+            return CommandResult(["还没有安装任何 Skill（放入 .conti/skills/*.md）。"])
+        return CommandResult([f"- {skill.name}：{skill.description}" for skill in skills])
+
     commands = (
         (CommandSpec("help", "显示命令帮助", "/help"), help_handler),
         (CommandSpec("models", "列出可用模型", "/models"), models_handler),
@@ -289,6 +299,7 @@ def create_default_registry() -> CommandRegistry:
         (CommandSpec("compact", "压缩当前历史", "/compact", (), True), compact_handler),
         (CommandSpec("permission", "查看/切换权限档位", "/permission [mode]"), permission_handler),
         (CommandSpec("undo", "回滚到最近的 git 检查点", "/undo", (), True), undo_handler),
+        (CommandSpec("skills", "列出已安装 Skill", "/skills"), skills_handler),
         (CommandSpec("new", "开启新会话", "/new", (), True), new_handler),
         (CommandSpec("activity", "查看完整活动", "/activity"), activity_handler),
         (CommandSpec("panel", "切换状态面板", "/panel"), panel_handler),
