@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import sys
@@ -46,7 +47,8 @@ from .providers import (
 )
 from .sessions import SessionStore
 from .skills import SkillLibrary
-from .tools import ToolContext
+from .team import LEADER, TeamHub, TeamRunner
+from .tools import Tool, ToolContext, ToolResult
 from .tools_local import create_local_registry
 from .tools_misc import LoadSkillTool, MemoryWriteTool, RequestInputTool, TaskNoteTool
 from .workspace import Workspace
@@ -128,6 +130,112 @@ def create_provider(provider: ProviderConfig):
     raise ConfigurationError(f"不支持的协议：{provider.protocol}")
 
 
+class TeamCreateTool(Tool):
+    """队长侧：组建团队并后台运行（进度经收件箱自动送达对话）。"""
+
+    name = "team_create"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "members": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "profile": {"type": "string"},
+                    },
+                    "required": ["name", "profile"],
+                },
+            },
+            "tasks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "title": {"type": "string"},
+                        "owner": {"type": "string"},
+                        "depends_on": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["title", "owner"],
+                },
+            },
+        },
+        "required": ["members", "tasks"],
+    }
+    effects = frozenset({"control"})
+
+    def __init__(self, runtime: "Runtime") -> None:
+        self.runtime = runtime
+        catalog = "；".join(
+            f"{profile.name}（{profile.description or '无描述'}）"
+            for profile in runtime.config.profiles
+        )
+        self.description = (
+            "组建 agent 团队并行协作（异步运行：进度、交付与最终报告会自动"
+            "送达你的对话，无需轮询）。可用 profile："
+            + (catalog or "（尚未配置任何 profile）")
+        )
+
+    async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
+        runtime = self.runtime
+        if runtime.active_team is not None:
+            return ToolResult("已有团队在运行，先用 team_close 收队。", is_error=True)
+        hub = TeamHub(runtime.root)
+        try:
+            hub.open_team(arguments["members"], arguments.get("tasks") or [])
+        except ToolValidationError as exc:
+            return ToolResult(str(exc), is_error=True)
+        runtime.active_team = {"hub": hub, "finished": asyncio.Event(), "summary": ""}
+
+        async def background() -> None:
+            try:
+                summary = await runtime.team_runner.run(
+                    hub, arguments["members"],
+                    provider=runtime.provider,
+                    session_store=runtime.sessions,
+                    session_id=context.session_id,
+                    park_timeout=runtime.team_park_timeout,
+                    team_timeout=runtime.team_timeout,
+                )
+                runtime.active_team["summary"] = summary
+            except Exception as exc:
+                if runtime.active_team is not None:
+                    runtime.active_team["summary"] = f"团队异常终止：{exc}"
+                    runtime.active_team["finished"].set()
+            else:
+                if runtime.active_team is not None:
+                    runtime.active_team["finished"].set()
+
+        asyncio.create_task(background())
+        return ToolResult(
+            f"团队 {hub.team_id} 已建立并开始运行（{hub.board_digest()}）。"
+            "交付与进度会自动送达；全部完成后你会收到最终报告。"
+        )
+
+
+class TeamCloseTool(Tool):
+    """队长侧：主动收队。"""
+
+    name = "team_close"
+    description = "收队：终止团队所有成员并给出最终报告。"
+    parameters = {"type": "object", "properties": {}}
+    effects = frozenset({"control"})
+
+    def __init__(self, runtime: "Runtime") -> None:
+        self.runtime = runtime
+
+    async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
+        team = self.runtime.active_team
+        if team is None:
+            return ToolResult("当前没有运行中的团队。")
+        team["hub"].finish("leader 主动收队")
+        report = team["summary"] or team["hub"].final_report()
+        self.runtime.active_team = None
+        return ToolResult("团队已收队。\n" + report)
+
+
 class Runtime:
     """CLI、REPL、HTTP 服务共用的运行时门面。"""
 
@@ -163,6 +271,18 @@ class Runtime:
             config.runtime.permission_mode,
         )
         self.registry.register(SpawnTaskTool(self.profile_runner))
+        # Agent Team（HIGHLIGHTS 亮点 5）：队长侧工具 + 后台团队状态。
+        self.team_runner = TeamRunner(
+            self.provider, self.registry, self.workspace.root,
+            {profile.name: profile for profile in config.profiles},
+        )
+        self.active_team: dict[str, Any] | None = None
+        # 团队成员挂起/全队超时（测试与高级用户可调小）。
+        self.team_park_timeout = 120.0
+        self.team_timeout = 1_800.0
+        if config.collaboration_enabled:
+            self.registry.register(TeamCreateTool(self))
+            self.registry.register(TeamCloseTool(self))
         self.permission_checker = PermissionChecker(
             config.runtime.permission_mode,
             workspace=self.workspace,
@@ -220,6 +340,39 @@ class Runtime:
     async def undo_last(self) -> str:
         """回滚到最近的 git 检查点。"""
         return await self.checkpoint.undo()
+
+    # ---------- Agent Team：队长收件箱与状态（HIGHLIGHTS 亮点 5） ----------
+
+    async def _team_inbox(self) -> str | None:
+        """队长的步边界注入：交付/消息/最终报告自动送达对话。"""
+        team = self.active_team
+        if team is None:
+            return None
+        hub: TeamHub = team["hub"]
+        lines: list[str] = []
+        inbox = hub.drain(LEADER)
+        if inbox:
+            hub.mark_delivered(LEADER, inbox)
+            for message in inbox:
+                if message.get("task_id"):
+                    lines.append(f"【团队交付】{message['from']} 完成任务 "
+                                 f"{message['task_id']}：{message['body']}")
+                elif message.get("type") == "system":
+                    lines.append(f"【团队】{message['body']}")
+                else:
+                    lines.append(f"【团队】{message['from']} → 你：{message['body']}")
+        if team["finished"].is_set():
+            lines.append("【团队】已收队，最终报告：\n"
+                         + (team["summary"] or hub.final_report()))
+            self.active_team = None
+        elif lines:
+            lines.append(hub.board_digest())
+        return "\n".join(lines) if lines else None
+
+    def team_status(self) -> str:
+        if self.active_team is None:
+            return "当前没有运行中的团队。"
+        return self.active_team["hub"].board_digest()
 
     # ---------- auto dream（HIGHLIGHTS 2.3 第一层） ----------
 
@@ -379,6 +532,7 @@ class Runtime:
         self.provider_config = config
         self.provider = provider
         self.profile_runner.provider = provider
+        self.team_runner.provider = provider
         self._update_context_window(config)
         created_session = False
         if session_id is None:
@@ -506,6 +660,7 @@ class Runtime:
                 usage_observer=observe_usage,
                 pre_request_hook=pre_request,
                 checkpoint=self.checkpoint,
+                inbox_hook=self._team_inbox,
             )
             try:
                 async for item in agent.run(messages):

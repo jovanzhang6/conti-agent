@@ -289,6 +289,13 @@ def create_default_registry() -> CommandRegistry:
             return CommandResult(["还没有安装任何 Skill（放入 .conti/skills/*.md）。"])
         return CommandResult([f"- {skill.name}：{skill.description}" for skill in skills])
 
+    def team_handler(context: CommandContext, arguments: list[str]) -> CommandResult:
+        """查看团队任务板。"""
+        get_status = getattr(context.runtime, "team_status", None)
+        if not callable(get_status):
+            return CommandResult(["当前环境不支持团队。"], status="error")
+        return CommandResult([get_status()])
+
     commands = (
         (CommandSpec("help", "显示命令帮助", "/help"), help_handler),
         (CommandSpec("models", "列出可用模型", "/models"), models_handler),
@@ -300,6 +307,7 @@ def create_default_registry() -> CommandRegistry:
         (CommandSpec("permission", "查看/切换权限档位", "/permission [mode]"), permission_handler),
         (CommandSpec("undo", "回滚到最近的 git 检查点", "/undo", (), True), undo_handler),
         (CommandSpec("skills", "列出已安装 Skill", "/skills"), skills_handler),
+        (CommandSpec("team", "查看团队任务板", "/team"), team_handler),
         (CommandSpec("new", "开启新会话", "/new", (), True), new_handler),
         (CommandSpec("activity", "查看完整活动", "/activity"), activity_handler),
         (CommandSpec("panel", "切换状态面板", "/panel"), panel_handler),

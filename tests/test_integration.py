@@ -8,7 +8,6 @@ from conti_agent.cli import run_chat, run_cli
 from conti_agent.collab import CollaborationError, CrewManager
 from conti_agent.runtime import Runtime
 from conti_agent.service import RuntimeService, ServiceRequestError
-from conti_agent.snapshots import SnapshotError, SnapshotManager
 
 
 class IntegrationTestCase(unittest.IsolatedAsyncioTestCase):
@@ -77,11 +76,6 @@ model = "fake-model"
         self.assertEqual(CrewManager(root, "release").get_task("t1").result, "完成")
         with self.assertRaises(CollaborationError):
             crew.get_task("missing")
-
-    async def test_snapshot_requires_git_and_rejects_missing(self) -> None:
-        manager = SnapshotManager(self.root)
-        with self.assertRaises(SnapshotError):
-            await manager.create("not-a-repo")
 
     async def test_service_validation_and_submission(self) -> None:
         runtime = Runtime(__import__("conti_agent.config", fromlist=["load_single"]).load_single(

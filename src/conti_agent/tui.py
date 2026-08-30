@@ -310,6 +310,11 @@ class TuiState:
                 message.text = text
             else:
                 self.append_tool_activity(text)
+        elif event_type == "team.delivered":
+            # 团队消息/交付送达队长：一行活动 + 可 Ctrl+O 看全文。
+            text = str(payload.get("text") or "")
+            first_line = text.splitlines()[0] if text else ""
+            self.append_tool_activity(f"👥 {first_line}（详情见对话流）")
         elif event_type == "run.failed":
             # 只更新状态与计数；错误详情由任务异常路径统一展示一次。
             self.error_count += 1

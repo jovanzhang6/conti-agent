@@ -31,7 +31,7 @@ class Agent:
                  session_store=None, session_id: str = "",
                  hook_engine=None, result_spiller=None,
                  usage_observer=None, pre_request_hook=None,
-                 checkpoint=None) -> None:
+                 checkpoint=None, inbox_hook=None) -> None:
         self.provider = provider
         self.registry = registry
         self.context = context
@@ -44,6 +44,9 @@ class Agent:
         self.result_spiller = result_spiller
         # git 检查点管理器：危险/越界/受保护操作放行前先打检查点。
         self.checkpoint = checkpoint
+        # 团队收件箱钩子：每次发模型请求前调用，返回注入文本或 None
+        # （步边界投递，HIGHLIGHTS 亮点 5）。
+        self.inbox_hook = inbox_hook
         # 每次响应到达时同步记录精确用量与覆盖的消息条数。
         self.usage_observer = usage_observer
         # 每次向模型发请求之前调用：做上下文投影检查，超限就压缩。
@@ -167,6 +170,16 @@ class Agent:
                 for iteration in range(1, self.config.max_tool_iterations + 1):
                     if self.pre_request_hook is not None:
                         await self.pre_request_hook(messages)
+                    if self.inbox_hook is not None:
+                        notice = await self.inbox_hook()
+                        if notice:
+                            message = user_message(notice)
+                            messages.append(message)
+                            if self.session_store and self.session_id:
+                                self.session_store.append_message(
+                                    self.session_id, message
+                                )
+                            emit(event("team.delivered", text=notice[:200]))
                     sent_count = len(messages)
                     response = await self._complete_with_retry(messages, emit)
                     if response.usage:
