@@ -24,8 +24,7 @@ class TeamHubTestCase(unittest.IsolatedAsyncioTestCase):
             [{"name": "scout", "profile": "reader"},
              {"name": "writer", "profile": "writer"}],
             [{"id": "T1", "title": "调研A", "owner": "scout"},
-             {"id": "T2", "title": "写报告", "owner": "writer",
-              "depends_on": ["T1"]}],
+             {"id": "T2", "title": "写报告", "owner": "writer"}],
         )
 
     def tearDown(self) -> None:
@@ -56,12 +55,16 @@ class TeamHubTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.hub.drain("writer")), 1)
         self.assertEqual(len(self.hub.drain(LEADER)), 1)
 
-    async def test_dependency_unlock_notifies_owner(self) -> None:
-        self.assertEqual(self.hub.tasks["T2"].status, "waiting")
+    async def test_leader_dispatch_via_send(self) -> None:
+        """开工顺序由 leader 智能调度：交付唤醒 leader 后由它 team_send
+        指派后续任务并携带上下文，hub 不做机械解锁。"""
         self.hub.complete_task("T1", "调研完成", "scout")
-        self.assertEqual(self.hub.tasks["T2"].status, "todo")
+        self.hub.send(LEADER, "writer",
+                      "T1 完成，摘要：A 库阈值 90%。开始 T2 写报告")
         inbox = self.hub.drain("writer")
-        self.assertTrue(any("T1 已完成" in m["body"] for m in inbox))
+        self.assertEqual(len(inbox), 1)
+        self.assertIn("开始 T2", inbox[0]["body"])
+        self.assertEqual(self.hub.tasks["T2"].status, "todo")
 
     async def test_wake_event(self) -> None:
         self.hub.set_status("writer", "parked")

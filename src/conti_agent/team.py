@@ -41,8 +41,7 @@ class TeamTask:
     id: str
     title: str
     owner: str
-    depends_on: list[str] = field(default_factory=list)
-    status: str = "todo"  # todo / waiting / doing / done / failed
+    status: str = "todo"  # todo / doing / done / failed
     result: str = ""
 
 
@@ -108,20 +107,15 @@ class TeamHub:
                                   "status": "running"}
             self.mailbox[name] = []
             self.wake[name] = asyncio.Event()
+        # 任务依赖与开工顺序由 leader 的智能调度（交付自动唤醒 leader，
+        # 由它 team_send 分派后续任务），hub 只维护"谁负责什么、做完没有"。
         seen: set[str] = set()
         for index, item in enumerate(tasks, 1):
             task_id = str(item.get("id") or f"T{index}")
             owner = str(item["owner"])
             if owner not in self.members:
                 raise ToolValidationError(f"任务 {task_id} 的负责人不存在：{owner}")
-            deps = [str(dep) for dep in item.get("depends_on") or []]
-            unknown = [dep for dep in deps if dep not in {str(t.get("id") or f"T{i}")
-                                                          for i, t in enumerate(tasks, 1)}]
-            if unknown:
-                raise ToolValidationError(f"任务 {task_id} 依赖不存在的任务：{unknown}")
-            status = "todo" if not deps else "waiting"
-            self.tasks[task_id] = TeamTask(task_id, str(item["title"]), owner,
-                                           deps, status)
+            self.tasks[task_id] = TeamTask(task_id, str(item["title"]), owner)
             seen.add(task_id)
         self._journal("team.opened", members=list(self.members),
                       tasks={key: asdict(value) for key, value in self.tasks.items()})
@@ -199,9 +193,7 @@ class TeamHub:
 
     def ready_tasks(self, agent_name: str) -> list[TeamTask]:
         return [task for task in self.tasks.values()
-                if task.owner == agent_name and task.status == "todo"
-                and all(self.tasks[dep].status == "done"
-                        for dep in task.depends_on if dep in self.tasks)]
+                if task.owner == agent_name and task.status == "todo"]
 
     def my_doing(self, agent_name: str) -> list[TeamTask]:
         return [task for task in self.tasks.values()
@@ -214,15 +206,6 @@ class TeamHub:
         task.status = "done"
         task.result = result
         self._journal("task.completed", task_id=task_id, by=by)
-        # 依赖就绪：解锁 waiting 任务并通知负责人。
-        for other in self.tasks.values():
-            if other.status == "waiting" and task_id in other.depends_on \
-                    and all(self.tasks[dep].status == "done"
-                            for dep in other.depends_on if dep in self.tasks):
-                other.status = "todo"
-                self.send(LEADER, other.owner,
-                          f"依赖 {task_id} 已完成，任务 {other.id}"
-                          f"「{other.title}」可以开始", type="system")
         self._save_state()
 
     def fail_task(self, task_id: str, reason: str) -> None:
@@ -239,9 +222,9 @@ class TeamHub:
             return "任务板为空"
         parts = []
         for task in self.tasks.values():
-            mark = {"done": "✓", "failed": "✗", "doing": "⏳", "waiting": "○"}.get(
+            mark = {"done": "✓", "failed": "✗", "doing": "⏳"}.get(
                 task.status, "○")
-            owner = f"→{task.owner}" if task.status in {"doing", "waiting"} else ""
+            owner = f"→{task.owner}" if task.status == "doing" else ""
             parts.append(f"{task.id}{mark}{owner}")
         return "任务板：" + "｜".join(parts)
 
@@ -366,7 +349,7 @@ class TeamRunner:
             task.cancel()
         if pending:
             for task_id, task in hub.tasks.items():
-                if task.status in {"todo", "waiting", "doing"}:
+                if task.status in {"todo", "doing"}:
                     hub.fail_task(task_id, "团队超时")
         hub.finish("团队运行结束" if not pending else "团队超时收队")
         return hub.final_report()
@@ -396,9 +379,7 @@ class TeamRunner:
         # 无审批入口：子代理的审批请求确定性拒绝（fail-closed）。
         assigned = [task for task in hub.tasks.values() if task.owner == name]
         brief = "\n".join(
-            f"- {task.id}「{task.title}」"
-            + ("（等依赖就绪的通知再开始）" if task.status == "waiting" else "")
-            for task in assigned
+            f"- {task.id}「{task.title}」" for task in assigned
         ) or "（暂无任务，等待 team_send 通知）"
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": profile.system_prompt + "\n\n" + TEAM_PROTOCOL},
@@ -416,6 +397,17 @@ class TeamRunner:
                              type="system")
                 hub.set_status(name, "failed")
                 return
+            # 步边界之外的收件箱投递：唤醒或挂起超时回到循环顶部时，
+            # 未消费的消息在这里一次性注入。
+            inbox = hub.drain(name)
+            if inbox:
+                hub.mark_delivered(name, inbox)
+                notice = "\n".join(
+                    f"【团队消息】来自 {m['from']}：{m['body']}"
+                    + (f"（任务 {m['task_id']}）" if m.get("task_id") else "")
+                    for m in inbox
+                )
+                messages.append(user_message(notice))
             agent = Agent(
                 self.provider, registry, context,
                 AgentRunConfig(max_tool_iterations=profile.max_tool_iterations),
@@ -480,15 +472,13 @@ class TeamRunner:
                              f"任务 {task.id} 失败：{name} 未交付", type="system")
                 hub.set_status(name, "done")
                 return
-            # 无事可做：挂起等唤醒。
-            hub.set_status(name, "parked")
-            woke = await hub.wait_wake(name, timeout=park_timeout)
-            hub.set_status(name, "running")
-            if hub.status != "open":
+            mine = [t for t in hub.tasks.values() if t.owner == name]
+            if mine and all(t.status in {"done", "failed"} for t in mine):
+                # 名下任务全部完结 → 收工。
                 hub.set_status(name, "done")
                 return
-            if not woke:
-                # park 超时：板上还有我的活就继续，否则收工。
-                if not hub.ready_tasks(name) and not hub.drain(name):
-                    hub.set_status(name, "done")
-                    return
+            # 无事可做：挂起等唤醒。leader 可能随时 team_send 指派新任务
+            # 或补充上下文，成员不自行退场（团队超时保险丝统一兜底）。
+            hub.set_status(name, "parked")
+            await hub.wait_wake(name, timeout=park_timeout)
+            hub.set_status(name, "running")

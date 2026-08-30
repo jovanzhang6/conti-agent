@@ -544,8 +544,13 @@ worktree）；②子代理权限 ≤ 父（继承 deny 或审批钉死）；③a
 roster:  {agent: running|parked|done}        # 状态由 runner 直接观察
                                               # agent.run 生命周期维护，永不推断
 mailbox: {agent: deque[Message]}             # 每人一个 FIFO 收件箱
-tasks:   {task_id: Task}                     # 任务板，任务带 depends_on（DAG）
-                                              # 与预指派 owner
+tasks:   {task_id: Task}                     # 任务板：预指派负责人，交付即更新
+                                              # （不做机械依赖解锁——开工顺序
+                                              # 由 leader 智能调度，交付自动唤醒
+                                              # leader 后由它 team_send 分派后续
+                                              # 任务并携带汇总上下文，比机械的
+                                              # 系统通知信息质量更高、软硬依赖
+                                              # 更灵活）
 wake:    {agent: asyncio.Event}              # 唤醒事件（纯内存）
 ```
 
@@ -619,7 +624,7 @@ leader 转达）；任务板收尾后由 leader 语义化 team_close（可打回
 不转发子代理原文（交付是 leader 的输入不是用户的答案，过程留在
 子代理对话里）。过程全程围观：队内通信与任务状态变化透传到活动行
 （可 Ctrl+O 展开），`/team` 看任务板。正常结束状态：任务板无
-doing/todo/waiting、全员 done、leader 生成收尾输出、team_close 写
+doing/todo、全员 done、leader 生成收尾输出、team_close 写
 终态归档（journal 永久可审计）。防呆：任务板全清且 leader 回合
 结束而未 close → 调度器自动归档。
 
