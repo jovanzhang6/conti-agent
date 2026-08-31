@@ -714,10 +714,10 @@ class Runtime:
 
         final_text = ""
         # 团队自动续回合的工具调用密集（逐成员 team_send 分派、处理
-        # 交付），迭代预算放大到不低于 32，避免调度中途触顶失败。
+        # 交付），迭代预算放大到不低于 96，避免调度中途触顶失败。
         tool_limit = self.config.runtime.max_tool_iterations
         if prompt is None:
-            tool_limit = max(tool_limit, 32)
+            tool_limit = max(tool_limit, 96)
         for attempt in range(2):
             agent = Agent(
                 self.provider, self.registry, context,
