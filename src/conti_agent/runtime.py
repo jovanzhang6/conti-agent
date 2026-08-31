@@ -18,7 +18,7 @@ from .context import (
     default_summary,
     estimate_message_tokens,
 )
-from .errors import ConfigurationError, ProviderError
+from .errors import ConfigurationError, ProviderError, ToolValidationError
 from .events import AgentEvent, event
 from .external import ExternalToolManager, StdioExternalConnector
 from .git_snapshot import GitCheckpoint
@@ -174,7 +174,8 @@ class TeamCreateTool(Tool):
         )
         self.description = (
             "组建 agent 团队并行协作（异步运行：进度、交付与最终报告会自动"
-            "送达你的对话，无需轮询）。可用 profile："
+            "送达你的对话，无需轮询；成员最多 4 名，超出请分批建队）。"
+            "可用 profile："
             + (catalog or "（尚未配置任何 profile）")
         )
 
@@ -693,10 +694,15 @@ class Runtime:
                     events.append(event("context.compacted", reason=reason))
 
         final_text = ""
+        # 团队自动续回合的工具调用密集（逐成员 team_send 分派、处理
+        # 交付），迭代预算放大到不低于 32，避免调度中途触顶失败。
+        tool_limit = self.config.runtime.max_tool_iterations
+        if prompt is None:
+            tool_limit = max(tool_limit, 32)
         for attempt in range(2):
             agent = Agent(
                 self.provider, self.registry, context,
-                AgentRunConfig(max_tool_iterations=self.config.runtime.max_tool_iterations),
+                AgentRunConfig(max_tool_iterations=tool_limit),
                 permission_checker=self.permission_checker,
                 auditor=self.auditor,
                 session_store=self.sessions,

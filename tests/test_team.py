@@ -238,6 +238,38 @@ permission_mode = "workspace"
         # 再查：无团队时静默。
         self.assertIsNone(await runtime._team_inbox())
 
+    async def test_team_create_over_limit_returns_friendly_error(self) -> None:
+        """超过成员上限时返回可读错误（含上限数字），绝不 NameError。"""
+        config_path = self.root / "runtime.toml"
+        config_path.write_text(r"""
+[[provider]]
+name = "fake"
+protocol = "fake"
+base_url = "local://fake"
+model = "fake"
+[runtime]
+permission_mode = "workspace"
+[[profile]]
+name = "worker"
+description = "w"
+system_prompt = "worker"
+allowed_tools = []
+permission_mode = "workspace"
+""", encoding="utf-8")
+        runtime = Runtime(load_single(config_path), self.root,
+                          output_function=lambda text: None)
+        tool = runtime.registry.get("team_create")
+        self.assertIn("最多 4 名", tool.description)
+        result = await tool.execute({
+            "members": [{"name": f"m{i}", "profile": "worker"}
+                        for i in range(5)],
+            "tasks": [],
+        }, ToolContext(workspace=self.root, session_id="s"))
+        self.assertTrue(result.is_error)
+        self.assertIn("上限 4", result.output)
+        self.assertNotIn("NameError", result.output)
+        self.assertIsNone(runtime.active_team)
+
     async def test_team_needs_leader_lifecycle(self) -> None:
         """自动唤醒判据：交付入箱 → 需要；报告送达 → 不再需要。"""
         config_path = self.root / "runtime.toml"
