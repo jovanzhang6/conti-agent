@@ -376,8 +376,33 @@ class TeamRunner:
                            max_member_turns: int = 8,
                            park_timeout: float = DEFAULT_PARK_TIMEOUT) -> None:
         name = str(member["name"])
+        try:
+            await self._member_loop_inner(hub, member, emit=emit,
+                                          max_member_turns=max_member_turns,
+                                          park_timeout=park_timeout)
+        except BaseException as exc:
+            import traceback
+            hub._journal("member.crashed", member=name,
+                         error=f"{type(exc).__name__}: {exc}",
+                         trace=traceback.format_exc()[-2000:])
+            hub.set_status(name, "failed")
+            try:
+                hub.send(LEADER, LEADER,
+                         f"成员 {name} 异常退出：{type(exc).__name__}: {exc}",
+                         type="system")
+            except Exception:
+                pass
+            raise
+
+    async def _member_loop_inner(self, hub: TeamHub, member: dict[str, Any], *,
+                                 emit: Callable[[Any], None] | None = None,
+                                 max_member_turns: int = 8,
+                                 park_timeout: float = DEFAULT_PARK_TIMEOUT) -> None:
+        name = str(member["name"])
         profile = self.profiles.get(str(member["profile"]))
         if profile is None:
+            hub._journal("member.failed", member=name,
+                         error=f"profile 不存在：{member.get('profile')}")
             hub.send(LEADER, LEADER, f"成员 {name} 的 profile 不存在", type="system")
             hub.set_status(name, "failed")
             return
@@ -404,43 +429,33 @@ class TeamRunner:
         ]
         turns = 0
         nudged: set[str] = set()
-        try:
-            await self._member_loop_body(hub, name, profile, registry, context,
-                                         checker, messages, turns, nudged,
-                                         max_member_turns, park_timeout,
-                                         emit=emit)
-        except BaseException as exc:
-            import traceback
-            hub._journal("member.crashed", member=name,
-                         error=f"{type(exc).__name__}: {exc}",
-                         trace=traceback.format_exc()[-2000:])
-            hub.set_status(name, "failed")
-            try:
-                hub.send(LEADER, LEADER,
-                         f"成员 {name} 异常退出：{type(exc).__name__}: {exc}",
-                         type="system")
-            except Exception:
-                pass
-            raise
+        # 崩溃记账由外层 _member_loop 的 except 统一承担。
+        await self._member_loop_body(hub, name, profile, registry, context,
+                                     checker, messages, turns, nudged,
+                                     max_member_turns, park_timeout,
+                                     emit=emit)
 
     async def _member_loop_body(self, hub: TeamHub, name: str, profile: Any,
-                          registry: ToolRegistry, context: ToolContext,
-                          checker: PermissionChecker,
-                          messages: list[dict[str, Any]], turns: int,
-                          nudged: set[str], max_member_turns: int,
-                          park_timeout: float,
-                          emit: Callable[[Any], None] | None = None) -> None:
+                                registry: ToolRegistry, context: ToolContext,
+                                checker: PermissionChecker,
+                                messages: list[dict[str, Any]], turns: int,
+                                nudged: set[str], max_member_turns: int,
+                                park_timeout: float,
+                                emit: Callable[[Any], None] | None = None) -> None:
+        """成员回合循环：跑任务 → 查收件箱 → 挂起等唤醒。"""
         while hub.status == "open":
             turns += 1
             if turns > max_member_turns:
                 for task in hub.my_doing(name):
                     hub.fail_task(task.id, f"{name} 轮数超限")
-                    hub.send(LEADER, LEADER, f"任务 {task.id} 因 {name} 轮数超限失败",
+                    hub.send(LEADER, LEADER,
+                             f"任务 {task.id} 因 {name} 轮数超限失败",
                              type="system")
+                hub._journal("member.failed", member=name,
+                             error=f"轮数超限（{max_member_turns} 轮）")
                 hub.set_status(name, "failed")
                 return
-            # 步边界之外的收件箱投递：唤醒或挂起超时回到循环顶部时，
-            # 未消费的消息在这里一次性注入。
+            # 唤醒或挂起超时回到循环顶部时，收件箱一次性注入。
             inbox = hub.drain(name)
             if inbox:
                 hub.mark_delivered(name, inbox)
@@ -464,10 +479,13 @@ class TeamRunner:
                         emit(item)
             except Exception as exc:
                 # 机制级异常：自动重试一次（保留任务简报 + 异常摘要），
-                # 再失败交队长。
+                # 再失败交队长。原因必须落 journal——这是唯一的真相源。
+                import traceback
+                hub._journal("member.turn_failed", member=name,
+                             error=f"{type(exc).__name__}: {exc}",
+                             trace=traceback.format_exc()[-2000:])
                 try:
-                    brief = messages[1] if len(messages) > 1 \
-                        else user_message(f"任务板：{hub.board_digest()}")
+                    brief = messages[1] if len(messages) > 1                         else user_message(f"任务板：{hub.board_digest()}")
                     retry_messages = [
                         messages[0],
                         brief,
@@ -483,11 +501,16 @@ class TeamRunner:
                         if emit is not None:
                             emit(item)
                     messages = retry_messages
-                except Exception:
+                except Exception as retry_exc:
+                    import traceback
+                    hub._journal("member.failed", member=name,
+                                 error=f"{type(retry_exc).__name__}: {retry_exc}",
+                                 trace=traceback.format_exc()[-2000:])
                     for task in hub.my_doing(name):
-                        hub.fail_task(task.id, f"{name} 异常：{exc}")
-                        hub.send(LEADER, LEADER,
-                                 f"成员 {name} 异常退出：{exc}", type="system")
+                        hub.fail_task(task.id, f"{name} 异常：{retry_exc}")
+                    notice = (f"成员 {name} 异常退出：{retry_exc}；"
+                              f"首次原因：{exc}")
+                    hub.send(LEADER, LEADER, notice, type="system")
                     hub.set_status(name, "failed")
                     return
             # 回合结束：查收件箱（步边界之外的收尾投递）。
@@ -529,3 +552,4 @@ class TeamRunner:
             hub.set_status(name, "parked")
             await hub.wait_wake(name, timeout=park_timeout)
             hub.set_status(name, "running")
+

@@ -199,34 +199,33 @@ class TeamCreateTool(Tool):
             except Exception:
                 pass
 
-        def member_emit(member_name: str):
-            """成员事件透传：工具活动实时进 UI（不转发文本 delta）。"""
-            def _emit(event: Any) -> None:
-                if runtime.on_team_notice is None:
-                    return
-                kind = event.type
-                payload = event.payload
-                try:
-                    if kind == "tool.requested":
-                        from .activity import format_tool_started
-                        runtime.on_team_notice(
-                            f"{member_name} {format_tool_started(
-                                str(payload.get('tool_name', '')),
-                                payload.get('arguments', {}))}")
-                    elif kind == "tool.completed":
-                        from .activity import format_tool_completed
-                        runtime.on_team_notice(
-                            f"{member_name} {format_tool_completed(
-                                str(payload.get('tool_name', '')),
-                                payload.get('arguments', {}),
-                                is_error=bool(payload.get('is_error')),
-                                elapsed=payload.get('metadata', {}).get('elapsed'))}")
-                    elif kind == "run.retry":
-                        runtime.on_team_notice(
-                            f"{member_name} 请求重试：{str(payload.get('error'))[:80]}")
-                except Exception:
-                    pass  # 透传失败不影响成员本身
-            return _emit
+        def member_emit(member_name: str, event: Any) -> None:
+            """成员事件透传：工具活动实时进 UI（不转发文本 delta）。
+            签名与 TeamRunner.run 的 emit(name, event) 契约一致。"""
+            if runtime.on_team_notice is None:
+                return
+            kind = event.type
+            payload = event.payload
+            try:
+                if kind == "tool.requested":
+                    from .activity import format_tool_started
+                    runtime.on_team_notice(
+                        f"{member_name} {format_tool_started(
+                            str(payload.get('tool_name', '')),
+                            payload.get('arguments', {}))}")
+                elif kind == "tool.completed":
+                    from .activity import format_tool_completed
+                    runtime.on_team_notice(
+                        f"{member_name} {format_tool_completed(
+                            str(payload.get('tool_name', '')),
+                            payload.get('arguments', {}),
+                            is_error=bool(payload.get('is_error')),
+                            elapsed=payload.get('metadata', {}).get('elapsed'))}")
+                elif kind == "run.retry":
+                    runtime.on_team_notice(
+                        f"{member_name} 请求重试：{str(payload.get('error'))[:80]}")
+            except Exception:
+                pass  # 透传失败不影响成员本身
 
         async def background() -> None:
             try:
