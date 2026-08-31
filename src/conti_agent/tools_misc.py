@@ -29,42 +29,6 @@ class LoadSkillTool(Tool):
         return ToolResult(skill.body, {"skill": skill.metadata})
 
 
-class TaskNoteTool(Tool):
-    name = "task_note"
-    description = "记录当前任务目标、结论或待办，便于恢复上下文。"
-    parameters = {
-        "type": "object",
-        "properties": {
-            "title": {"type": "string"},
-            "body": {"type": "string"},
-            "status": {"type": "string", "enum": ["todo", "doing", "done"]},
-        },
-        "required": ["title", "body"],
-    }
-    effects = frozenset({"write"})
-
-    def __init__(self, workspace: Workspace) -> None:
-        self.workspace = workspace
-
-    async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
-        path = self.workspace.resolve(".conti/runtime/tasks/notes.json")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        records: list[dict[str, Any]] = []
-        if path.exists():
-            try:
-                records = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                records = []
-        records.append({
-            "title": arguments["title"],
-            "body": arguments["body"],
-            "status": arguments.get("status", "todo"),
-            "session_id": context.session_id,
-        })
-        path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
-        return ToolResult("任务笔记已保存", {"count": len(records)})
-
-
 class MemoryWriteTool(Tool):
     name = "memory_write"
     description = (

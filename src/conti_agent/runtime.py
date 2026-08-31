@@ -50,7 +50,7 @@ from .skills import SkillLibrary
 from .team import LEADER, LeaderSendTool, TeamHub, TeamRunner
 from .tools import Tool, ToolContext, ToolResult
 from .tools_local import create_local_registry
-from .tools_misc import LoadSkillTool, MemoryWriteTool, RequestInputTool, TaskNoteTool
+from .tools_misc import LoadSkillTool, MemoryWriteTool, RequestInputTool
 from .workspace import Workspace
 
 
@@ -262,7 +262,6 @@ class Runtime:
             self.registry.register(LoadSkillTool(self.skill_library))
         self.memory = MemoryStore(self.root)
         self.registry.register(MemoryWriteTool(self.memory))
-        self.registry.register(TaskNoteTool(self.workspace))
         self.registry.register(RequestInputTool(self._dispatch_input))
         self.profile_runner = ProfileRunner(
             self.provider,
@@ -888,7 +887,7 @@ class Runtime:
             f"当前工作区：{self.workspace.root}",
             f"权限模式：{self.config.runtime.permission_mode}",
             f"可用工具：{', '.join(self.registry.names())}",
-            "需要用户澄清时调用 request_input；需要持久化任务信息时调用 task_note；"
+            "需要用户澄清时调用 request_input；"
             "用户明确要求记住某事时调用 memory_write。",
             *([skill_catalog] if skill_catalog else []),
             *([memory_text] if memory_text else []),

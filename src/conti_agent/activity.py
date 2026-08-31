@@ -28,8 +28,6 @@ def summarize_tool_action(name: str, arguments: dict[str, Any]) -> str:
         return f"执行命令 {command}"
     if name == "request_input":
         return "等待你补充信息"
-    if name == "task_note":
-        return f"保存任务笔记 {_text(arguments.get('title', ''))}"
     if name == "spawn_task":
         return f"派发子任务 {_text(arguments.get('profile', ''))}"
     if name == "load_skill":
