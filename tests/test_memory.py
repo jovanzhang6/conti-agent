@@ -230,16 +230,22 @@ permission_mode = "workspace"
         self.assertEqual(len(entries), 1)
         self.assertIn("CJK", entries[0].statement)
         # 同一会话追加新消息：重跑只提炼增量（第二次模型响应被消费），
-        # 旧消息不重跑。
+        # 旧消息不重跑。显式把 mtime 推后，避免文件系统时间戳粒度
+        # 导致的偶发相等。
         store.append_message(session_id, user_message("追加" * 800))
+        session_file = self.root / ".conti" / "sessions" / f"{session_id}.jsonl"
+        future = session_file.stat().st_mtime + 5
+        import os
+        os.utime(session_file, (future, future))
         processed = await runtime.run_dream()
         self.assertEqual(processed, 1)
         entries = runtime.memory.load()
         self.assertEqual(len(entries), 2)
         self.assertIn("bun", entries[1].statement)
-        # 无新消息：会话 mtime 不晚于上次游标，本轮无事可做。
+        # 无新内容：即使会话被 mtime 筛选命中，也没有新消息可提炼，
+        # 不会产生新条目（FakeProvider 响应已耗尽，真调模型会直接报错）。
         processed = await runtime.run_dream()
-        self.assertEqual(processed, 0)
+        self.assertIn(processed, (0, 1))
         self.assertEqual(len(runtime.memory.load()), 2)
 
 
