@@ -199,6 +199,35 @@ class TeamCreateTool(Tool):
             except Exception:
                 pass
 
+        def member_emit(member_name: str):
+            """成员事件透传：工具活动实时进 UI（不转发文本 delta）。"""
+            def _emit(event: Any) -> None:
+                if runtime.on_team_notice is None:
+                    return
+                kind = event.type
+                payload = event.payload
+                try:
+                    if kind == "tool.requested":
+                        from .activity import format_tool_started
+                        runtime.on_team_notice(
+                            f"{member_name} {format_tool_started(
+                                str(payload.get('tool_name', '')),
+                                payload.get('arguments', {}))}")
+                    elif kind == "tool.completed":
+                        from .activity import format_tool_completed
+                        runtime.on_team_notice(
+                            f"{member_name} {format_tool_completed(
+                                str(payload.get('tool_name', '')),
+                                payload.get('arguments', {}),
+                                is_error=bool(payload.get('is_error')),
+                                elapsed=payload.get('metadata', {}).get('elapsed'))}")
+                    elif kind == "run.retry":
+                        runtime.on_team_notice(
+                            f"{member_name} 请求重试：{str(payload.get('error'))[:80]}")
+                except Exception:
+                    pass  # 透传失败不影响成员本身
+            return _emit
+
         async def background() -> None:
             try:
                 summary = await runtime.team_runner.run(
@@ -206,6 +235,7 @@ class TeamCreateTool(Tool):
                     provider=runtime.provider,
                     park_timeout=runtime.team_park_timeout,
                     team_timeout=runtime.team_timeout,
+                    emit=member_emit,
                 )
                 runtime.active_team["summary"] = summary
             except Exception as exc:
@@ -365,8 +395,10 @@ class Runtime:
             label = ("交付" if message.get("task_id")
                      else "消息" if message.get("type") == "chat" else "通知")
             body = str(message.get("body", ""))[:160]
+            sender = ("团队" if message.get("from") == "__leader__"
+                      else str(message.get("from")))
             try:
-                self.on_team_notice(f"{message['from']} {label}：{body}")
+                self.on_team_notice(f"{sender} {label}：{body}")
             except Exception:
                 pass
 
@@ -425,6 +457,14 @@ class Runtime:
         if hub.drain(LEADER):
             return True
         return team["finished"].is_set() and not team.get("report_delivered")
+
+    def team_running_count(self) -> int:
+        """当前处于 running 状态的成员数（0 表示无活动团队）。"""
+        team = self.active_team
+        if team is None:
+            return 0
+        return sum(1 for name, info in team["hub"].members.items()
+                   if name != LEADER and info.get("status") == "running")
 
     # ---------- auto dream（HIGHLIGHTS 2.3 第一层） ----------
 

@@ -148,10 +148,13 @@ class TeamHub:
             self.mailbox[name].append(message)
             self._journal("message.sent", id=message["id"], **{
                 key: message[key] for key in ("from", "to", "type", "task_id")
-            })
+            }, body=str(body)[:400])
             sent.append(message)
             self._wake(name)
-            if name == LEADER and sender != LEADER and self.on_leader_message:
+            # 系统通知（含成员失败原因）即使发自 leader 也要让用户看到：
+            # 之前 sender != LEADER 的条件把 leader 自发消息排除在
+            # 被动通知外，失败原因全部静默进收件箱。
+            if name == LEADER and self.on_leader_message:
                 try:
                     self.on_leader_message(message)
                 except Exception:
@@ -341,7 +344,7 @@ class TeamRunner:
 
     async def run(self, hub: TeamHub, members: list[dict[str, Any]], *,
                   provider: Any = None,
-                  emit: Callable[[Any], None] | None = None,
+                  emit: Callable[[str, Any], None] | None = None,
                   max_member_turns: int = 8,
                   park_timeout: float = DEFAULT_PARK_TIMEOUT,
                   team_timeout: float = DEFAULT_TEAM_TIMEOUT) -> str:
@@ -351,7 +354,9 @@ class TeamRunner:
         member_tasks = [
             asyncio.create_task(self._member_loop(
                 hub, member,
-                emit=emit, max_member_turns=max_member_turns,
+                emit=(lambda item, name=str(member["name"]): emit(name, item))
+                if emit is not None else None,
+                max_member_turns=max_member_turns,
                 park_timeout=park_timeout,
             ))
             for member in members

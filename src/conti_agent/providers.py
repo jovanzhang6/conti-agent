@@ -17,16 +17,22 @@ from .tools import ToolRegistry
 _UNESCAPED_BACKSLASH_RE = re.compile(r'\\(?!["\\/bfnrtu])')
 
 
-def _load_tool_arguments(raw: str) -> dict[str, Any]:
+def _load_tool_arguments(raw: str, *, allow_repair: bool = True) -> dict[str, Any]:
     """解析流式聚合的工具参数。
 
     模型写 Windows 路径时经常漏掉反斜杠转义（D:\conti 而不是
     D:\\conti），严格解析会报 Invalid \\escape；先做一次修复重试：
     把后面不跟合法转义字符的孤立反斜杠补成双反斜杠。
+    allow_repair=False（响应被 max_tokens 截断时）跳过修复——截断的
+    JSON 被"修好"只会产出看似合法的坏参数。
     """
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
+        if not allow_repair:
+            raise ProviderError(
+                f"无效的工具参数流（响应被截断）：{raw[:80]}…"
+            )
         repaired = _UNESCAPED_BACKSLASH_RE.sub(r'\\\\', raw)
         try:
             return json.loads(repaired)
@@ -298,7 +304,22 @@ class OpenAICompatibleProvider(Provider):
         calls: list[ToolCall] = []
         for index in sorted(tool_parts):
             item = tool_parts[index]
-            arguments = _load_tool_arguments(item["arguments"] or "{}")
+            try:
+                arguments = _load_tool_arguments(
+                    item["arguments"] or "{}",
+                    allow_repair=stop_reason != "length",
+                )
+            except ProviderError as exc:
+                if stop_reason == "length":
+                    # 输出在 max_tokens 处被截断，工具参数 JSON 残缺：
+                    # 给出模型可自适应的明确错误（重试轮会把该原因带回
+                    # 给模型，促使它缩短单轮输出 / 分步交付）。
+                    raise ProviderError(
+                        "你的上一轮输出在 max_output_tokens 处被截断，"
+                        "工具调用的参数 JSON 不完整。请缩短本轮文本输出、"
+                        "减少一次调用的参数量，或把工作拆成多步完成。"
+                    ) from exc
+                raise
             wire_name = item["name"]
             calls.append(ToolCall(
                 item["id"] or f"call_{index}",

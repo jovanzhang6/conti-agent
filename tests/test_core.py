@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from pathlib import Path
 from typing import Any
@@ -204,6 +205,64 @@ class CoreTestCase(unittest.IsolatedAsyncioTestCase):
         # 无法修复时保持原有报错语义。
         with self.assertRaises(ProviderError):
             _load_tool_arguments('{"path": "unfinished')
+
+    def test_truncated_arguments_skip_repair(self) -> None:
+        # max_tokens 截断的残缺 JSON 不做修复：修好只会产出坏参数。
+        with self.assertRaises(ProviderError) as ctx:
+            _load_tool_arguments('{"path": "D:\\src', allow_repair=False)
+        self.assertIn("截断", str(ctx.exception))
+
+    def test_stream_truncation_error_is_actionable(self) -> None:
+        # finish_reason=length 且参数解析失败 → 错误文案指引模型缩短输出。
+        provider = OpenAICompatibleProvider(
+            base_url="https://example/v1", model="m", api_key="secret",
+        )
+        chunk_with_call = {"choices": [{"delta": {"tool_calls": [{
+            "index": 0, "id": "c1", "type": "function",
+            "function": {"name": "echo",
+                         "arguments": '{"text": "he'},
+        }]}}], "finish_reason": None}
+        chunk_length = {"choices": [{"delta": {},
+                                     "finish_reason": "length"}]}
+        sse_lines = [
+            ("data: " + json.dumps(chunk_with_call)).encode(),
+            ("data: " + json.dumps(chunk_length)).encode(),
+            b"data: [DONE]",
+        ]
+
+        class FakeResponse:
+            def readline(self):
+                return sse_lines.pop(0) if sse_lines else b""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        original_urlopen = None
+        import urllib.request as urllib_request
+        original_urlopen = urllib_request.urlopen
+
+        def fake_urlopen(request, timeout=None):
+            return FakeResponse()
+
+        urllib_request.urlopen = fake_urlopen
+        registry = ToolRegistry()
+        registry.register(EchoTool())
+
+        async def call():
+            return await provider.complete(
+                [user_message("q")], registry, lambda kind, payload: None,
+            )
+
+        try:
+            with self.assertRaises(ProviderError) as ctx:
+                asyncio.run(call())
+        finally:
+            urllib_request.urlopen = original_urlopen
+        self.assertIn("max_output_tokens", str(ctx.exception))
+        self.assertIn("缩短", str(ctx.exception))
 
     def test_anthropic_transport_mapping(self) -> None:
         def transport(url: str, method: str, headers: dict[str, str], payload: dict[str, Any]):

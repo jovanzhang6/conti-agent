@@ -861,9 +861,25 @@ class ContiTui:
             ("class:logo", " CONTI-AGENT "),
         ]
 
+    _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def _team_fragments(self) -> list[tuple[str, str]]:
+        """团队动效段：运行中的子 agent 计数 + 旋转指示。"""
+        try:
+            running = self.runtime.team_running_count()
+        except AttributeError:
+            return []
+        if running <= 0:
+            return []
+        frame = self._SPINNER[int(time.monotonic() * 4) % len(self._SPINNER)]
+        return [
+            ("class:team-live", f" {frame} {running} 个子 agent 运行中 "),
+            ("class:status-sep", "│"),
+        ]
+
     def _model_status_fragments(self) -> list[tuple[str, str]]:
         style = "class:status-busy" if self.state.busy else "class:status-idle"
-        return [(style, f" {self.state.status} ")]
+        return [*(self._team_fragments()), (style, f" {self.state.status} ")]
 
     def _shortcut_fragments(self) -> list[tuple[str, str]]:
         return [
@@ -982,6 +998,7 @@ class ContiTui:
             "scrollbar-thumb": "#0ea5e9",
             "scrollbar-track": "#1c2733",
             "activity-detail": "#71808f",
+            "team-live": "#0ea5e9 bold",
             "md-heading": "#7dd3fc bold",
             "md-bold": "#eef5fa bold",
             "md-italic": "italic #b9c8d4",
@@ -1224,11 +1241,23 @@ class ContiTui:
         # 不打断输入、不启动新回合（用户仍是 leader 的唯一唤醒者）。
         if hasattr(self.runtime, "on_team_notice"):
             self.runtime.on_team_notice = self._on_team_notice
+        ticker = asyncio.ensure_future(self._team_spinner_ticker())
         try:
             return await self.application.run_async()
         finally:
+            ticker.cancel()
             if self.output is None:
                 reset_cursor_shape()
+
+    async def _team_spinner_ticker(self) -> None:
+        """有子 agent 运行时周期性刷新，驱动 footer 的旋转动效。"""
+        try:
+            while True:
+                await asyncio.sleep(0.4)
+                if self.runtime.team_running_count() > 0:
+                    self.invalidate()
+        except asyncio.CancelledError:
+            pass
 
     def _on_team_notice(self, text: str) -> None:
         self.state.append_tool_activity(f"👥 {text}")
