@@ -28,7 +28,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $Python -m PyInstaller `
   --noconfirm `
   --clean `
-  --onefile `
+  --onedir `
   --console `
   --name "conti-agent" `
   --specpath "build-release" `
@@ -40,5 +40,5 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host ""
-Write-Host "发布文件：$ProjectRoot\dist\conti-agent.exe"
-Write-Host "使用方式：把 exe 放到工作目录，并在该目录准备 .conti\config.toml"
+Write-Host "发布目录：$ProjectRoot\dist\conti-agent（onedir，整个目录一起分发）"
+Write-Host "使用方式：运行 dist\conti-agent\conti-agent.exe，并在工作目录准备 .conti\config.toml"
