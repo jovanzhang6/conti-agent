@@ -7,7 +7,7 @@ from typing import Any, AsyncIterator
 
 from .errors import AgentIterationLimit, ProviderError
 from .events import AgentEvent, event
-from .messages import ToolCall, tool_message
+from .messages import ToolCall, tool_message, user_message
 from .permissions import AuditLogger, PermissionChecker, execute_tool_with_permissions
 from .tools import ToolResult
 from .providers import Provider

@@ -8,7 +8,7 @@ from typing import Any
 
 from conti_agent.commands import CommandContext, create_default_registry
 from conti_agent.config import load_single
-from conti_agent.messages import ToolCall
+from conti_agent.messages import ToolCall, user_message
 from conti_agent.providers import FakeProvider, ProviderResponse
 from conti_agent.runtime import Runtime
 from conti_agent.team import LEADER, LeaderSendTool, TeamHub, TeamRunner
@@ -269,6 +269,32 @@ permission_mode = "workspace"
         self.assertIn("上限 4", result.output)
         self.assertNotIn("NameError", result.output)
         self.assertIsNone(runtime.active_team)
+
+    async def test_leader_inbox_hook_injects_into_agent_loop(self) -> None:
+        """回归：leader agent 循环里的步边界注入（inbox_hook）必须把
+        收件箱消息作为 user 消息注入（曾因缺 user_message 导入而
+        NameError）。"""
+        from conti_agent.agent import Agent
+
+        provider = FakeProvider([ProviderResponse(text="收到交付")])
+        registry = ToolRegistry()
+        notices: list[str] = []
+
+        async def inbox() -> str | None:
+            if notices:
+                return None
+            notices.append("used")
+            return "【团队交付】w 完成任务 T1：交付内容"
+
+        agent = Agent(provider, registry, ToolContext(workspace=self.root),
+                      inbox_hook=inbox)
+        events = []
+        async for item in agent.run([user_message("开始")]):
+            events.append(item)
+        # 注入路径走通、模型收到消息后正常产出。
+        self.assertTrue(any(
+            item.type == "message.created" and "收到交付" in str(item.payload.get("text"))
+            for item in events))
 
     async def test_team_needs_leader_lifecycle(self) -> None:
         """自动唤醒判据：交付入箱 → 需要；报告送达 → 不再需要。"""
