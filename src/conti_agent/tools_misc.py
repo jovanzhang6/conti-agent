@@ -132,7 +132,9 @@ class RequestInputTool(Tool):
         },
         "required": ["question"],
     }
-    effects = frozenset({"control"})
+    # 向用户请求信息不是资源副作用：空 effects 让只读档下也能提问，
+    # 与 team_send 同理（通信/交互 ≠ 写入）。
+    effects = frozenset()
 
     def __init__(self, input_function: Callable[..., str]) -> None:
         self.input_function = input_function

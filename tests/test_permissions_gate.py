@@ -23,6 +23,17 @@ from conti_agent.tools import Tool, ToolContext
 from conti_agent.workspace import Workspace
 
 
+class ReadLikeTool(Tool):
+    name = "read_like"
+    description = "测试用只读工具。"
+    parameters = {"type": "object", "properties": {}}
+    effects = frozenset({"read"})
+
+    async def execute(self, arguments: dict[str, Any],
+                      context: ToolContext) -> Any:  # pragma: no cover
+        return None
+
+
 class WriteTool(Tool):
     name = "workspace_write"
     description = "测试用写入工具。"
@@ -152,6 +163,22 @@ class PermissionGateTestCase(unittest.IsolatedAsyncioTestCase):
         denied = await checker.check(
             tool, {"command": ["cat", outside, ">", "out.txt"]}, self.context)
         self.assertFalse(denied.allowed)
+
+    async def test_read_only_mode_allows_questioning_and_read(self) -> None:
+        """只读档：读类与提问类工具直接放行（effects 声明裁决）。"""
+        from conti_agent.tools_misc import RequestInputTool
+
+        async def approve(key, arguments, reason) -> str:  # pragma: no cover
+            raise AssertionError("读/提问工具不应触发审批")
+
+        checker = PermissionChecker("read_only", workspace=self.workspace,
+                                    approver=approve)
+        ok = await checker.check(ReadLikeTool(), {}, self.context)
+        self.assertTrue(ok.allowed)
+        question = await checker.check(
+            RequestInputTool(lambda q, o=None: "答案"), {"question": "?"},
+            self.context)
+        self.assertTrue(question.allowed)
 
     async def test_trusted_allows_dangerous_without_approval(self) -> None:
         """放行档全放行，但危险命令保留 git 检查点标记。"""
