@@ -190,6 +190,14 @@ class TeamCreateTool(Tool):
             return ToolResult(str(exc), is_error=True)
         runtime.active_team = {"hub": hub, "finished": asyncio.Event(), "summary": ""}
         runtime._notify_team_notice()
+        # 建队即动效：明确告知启动了几个子 agent、都是谁。
+        if runtime.on_team_notice:
+            names = "、".join(str(m["name"]) for m in arguments["members"])
+            try:
+                runtime.on_team_notice(
+                    f"已启动 {len(arguments['members'])} 个子 agent：{names}")
+            except Exception:
+                pass
 
         async def background() -> None:
             try:
@@ -362,7 +370,18 @@ class Runtime:
             except Exception:
                 pass
 
+        # 成员状态动效：建队/交付/挂起/退出即时显示在活动行。
+        def on_member_status(member: str, label: str) -> None:
+            if self.on_team_notice is None:
+                return
+            try:
+                self.on_team_notice(f"{member} {label}（{len(self.active_team['hub'].members) - 1} 个子 agent）"
+                                    if label == "运行中" else f"{member} {label}")
+            except Exception:
+                pass
+
         hub.on_leader_message = on_message
+        hub.on_member_status = on_member_status
 
     async def _team_inbox(self) -> str | None:
         """队长的步边界注入：交付/消息/最终报告自动送达对话。"""

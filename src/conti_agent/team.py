@@ -69,6 +69,8 @@ class TeamHub:
         # leader 空闲时的被动通知钩子（TUI 注入）：发往 LEADER 的每条
         # 消息立即回调显示；不启动新回合（唤醒权单向，用户是唯一唤醒者）。
         self.on_leader_message: Callable[[dict[str, Any]], None] | None = None
+        # 成员状态变化钩子（TUI 注入）：驱动"xx agent 在运行"的活动行动效。
+        self.on_member_status: Callable[[str, str], None] | None = None
 
     # ---------- 持久化 ----------
 
@@ -187,9 +189,20 @@ class TeamHub:
 
     # ---------- 任务板 ----------
 
+    _STATUS_LABELS = {"running": "运行中", "parked": "挂起等任务",
+                      "done": "已完成", "failed": "异常退出"}
+
     def set_status(self, member: str, status: str) -> None:
         if member in self.members:
+            changed = self.members[member]["status"] != status
             self.members[member]["status"] = status
+            # 运行中是常态不播报；其余状态变化即时推给 UI 动效。
+            if changed and status != "running" and self.on_member_status:
+                label = self._STATUS_LABELS.get(status, status)
+                try:
+                    self.on_member_status(member, label)
+                except Exception:
+                    pass  # UI 动效失败不影响成员本身
 
     def ready_tasks(self, agent_name: str) -> list[TeamTask]:
         return [task for task in self.tasks.values()
@@ -386,6 +399,32 @@ class TeamRunner:
         ]
         turns = 0
         nudged: set[str] = set()
+        try:
+            await self._member_loop_body(hub, name, profile, registry, context,
+                                         checker, messages, turns, nudged,
+                                         max_member_turns, park_timeout,
+                                         emit=emit)
+        except BaseException as exc:
+            import traceback
+            hub._journal("member.crashed", member=name,
+                         error=f"{type(exc).__name__}: {exc}",
+                         trace=traceback.format_exc()[-2000:])
+            hub.set_status(name, "failed")
+            try:
+                hub.send(LEADER, LEADER,
+                         f"成员 {name} 异常退出：{type(exc).__name__}: {exc}",
+                         type="system")
+            except Exception:
+                pass
+            raise
+
+    async def _member_loop_body(self, hub: TeamHub, name: str, profile: Any,
+                          registry: ToolRegistry, context: ToolContext,
+                          checker: PermissionChecker,
+                          messages: list[dict[str, Any]], turns: int,
+                          nudged: set[str], max_member_turns: int,
+                          park_timeout: float,
+                          emit: Callable[[Any], None] | None = None) -> None:
         while hub.status == "open":
             turns += 1
             if turns > max_member_turns:
