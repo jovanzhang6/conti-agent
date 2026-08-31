@@ -21,6 +21,10 @@ DEFAULT_MAX_MESSAGES = 200
 DEFAULT_PARK_TIMEOUT = 120.0
 DEFAULT_TEAM_TIMEOUT = 1_800.0
 
+
+class _TeamClosed(Exception):
+    """收队打断成员回合的内部信号（pre_request_hook 抛出）。"""
+
 TEAM_PROTOCOL = (
     "你是团队的一员。协作规则：\n"
     "1. 给队友发消息用 team_send(to=对方名字)；交付任务用 "
@@ -365,9 +369,13 @@ class TeamRunner:
         for task in pending:
             task.cancel()
         if pending:
-            for task_id, task in hub.tasks.items():
-                if task.status in {"todo", "doing"}:
-                    hub.fail_task(task_id, "团队超时")
+            reason = "团队超时"
+        else:
+            reason = "团队运行结束"
+        # 如实收尾：成员退出但任务没完成的，标记失败，不做假报告。
+        for task_id, task in hub.tasks.items():
+            if task.status in {"todo", "doing"}:
+                hub.fail_task(task_id, reason)
         hub.finish("团队运行结束" if not pending else "团队超时收队")
         return hub.final_report()
 
@@ -380,6 +388,11 @@ class TeamRunner:
             await self._member_loop_inner(hub, member, emit=emit,
                                           max_member_turns=max_member_turns,
                                           park_timeout=park_timeout)
+        except asyncio.CancelledError:
+            # 取消是运营性停止（团队超时/收队/退出），不是成员的错。
+            hub._journal("member.cancelled", member=name)
+            hub.set_status(name, "done")
+            raise
         except BaseException as exc:
             import traceback
             hub._journal("member.crashed", member=name,
@@ -442,8 +455,34 @@ class TeamRunner:
                                 nudged: set[str], max_member_turns: int,
                                 park_timeout: float,
                                 emit: Callable[[Any], None] | None = None) -> None:
-        """成员回合循环：跑任务 → 查收件箱 → 挂起等唤醒。"""
+        """成员回合循环：跑任务 → 查收件箱 → 挂起等唤醒。
+
+        挂起等待不消耗轮数——轮数只统计真正跑了模型的工作回合，
+        防止长时间挂起的成员被"轮数超限"误杀。
+        """
+        async def stop_if_closed(messages: list[dict[str, Any]]) -> None:
+            if hub.status != "open":
+                raise _TeamClosed()
+
         while hub.status == "open":
+            # 唤醒或挂起超时回到循环顶部时，收件箱一次性注入。
+            inbox = hub.drain(name)
+            if inbox:
+                hub.mark_delivered(name, inbox)
+                notice = "\n".join(
+                    f"【团队消息】来自 {m['from']}：{m['body']}"
+                    + (f"（任务 {m['task_id']}）" if m.get("task_id") else "")
+                    for m in inbox
+                )
+                messages.append(user_message(notice))
+            pending = [t for t in hub.tasks.values()
+                       if t.owner == name and t.status in {"todo", "doing"}]
+            if not inbox and not pending and turns > 0:
+                # 无消息也无待办：挂起等唤醒（不消耗工作轮数）。
+                hub.set_status(name, "parked")
+                await hub.wait_wake(name, timeout=park_timeout)
+                hub.set_status(name, "running")
+                continue
             turns += 1
             if turns > max_member_turns:
                 for task in hub.my_doing(name):
@@ -455,20 +494,11 @@ class TeamRunner:
                              error=f"轮数超限（{max_member_turns} 轮）")
                 hub.set_status(name, "failed")
                 return
-            # 唤醒或挂起超时回到循环顶部时，收件箱一次性注入。
-            inbox = hub.drain(name)
-            if inbox:
-                hub.mark_delivered(name, inbox)
-                notice = "\n".join(
-                    f"【团队消息】来自 {m['from']}：{m['body']}"
-                    + (f"（任务 {m['task_id']}）" if m.get("task_id") else "")
-                    for m in inbox
-                )
-                messages.append(user_message(notice))
             agent = Agent(
                 self.provider, registry, context,
                 AgentRunConfig(max_tool_iterations=profile.max_tool_iterations),
                 permission_checker=checker,
+                pre_request_hook=stop_if_closed,
                 # 成员对话不落 leader 会话账本：混入会污染 leader 的
                 # 消息回放序列；团队审计由 hub journal 与 leader 账本
                 # 里的 permission/team 事件承担。
@@ -477,6 +507,10 @@ class TeamRunner:
                 async for item in agent.run(messages):
                     if emit is not None:
                         emit(item)
+            except _TeamClosed:
+                # 收队打断：不是成员的错，安静退场（保留已完成的任务状态）。
+                hub.set_status(name, "done")
+                return
             except Exception as exc:
                 # 机制级异常：自动重试一次（保留任务简报 + 异常摘要），
                 # 再失败交队长。原因必须落 journal——这是唯一的真相源。
@@ -496,11 +530,15 @@ class TeamRunner:
                         self.provider, registry, context,
                         AgentRunConfig(max_tool_iterations=profile.max_tool_iterations),
                         permission_checker=checker,
+                        pre_request_hook=stop_if_closed,
                     )
                     async for item in retry_agent.run(retry_messages):
                         if emit is not None:
                             emit(item)
                     messages = retry_messages
+                except _TeamClosed:
+                    hub.set_status(name, "done")
+                    return
                 except Exception as retry_exc:
                     import traceback
                     hub._journal("member.failed", member=name,

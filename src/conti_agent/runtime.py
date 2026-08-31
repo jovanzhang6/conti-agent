@@ -249,6 +249,8 @@ class TeamCreateTool(Tool):
         return ToolResult(
             f"团队 {hub.team_id} 已建立并开始运行（{hub.board_digest()}）。"
             "交付与进度会自动送达；全部完成后你会收到最终报告。"
+            "收队守则：等所有任务交付、任务板无 todo/doing 后再调用 "
+            "team_close；成员交付时你会被自动唤醒进行汇总。"
         )
 
 
@@ -256,8 +258,19 @@ class TeamCloseTool(Tool):
     """队长侧：主动收队。"""
 
     name = "team_close"
-    description = "收队：终止团队所有成员并给出最终报告。"
-    parameters = {"type": "object", "properties": {}}
+    description = (
+        "收队：终止团队所有成员并给出最终报告。只应在所有任务都已交付、"
+        "或确认不再需要团队时调用；仍有进行中的工作时会要求 force 确认。"
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "force": {
+                "type": "boolean",
+                "description": "任务未全部完成时强制收队（默认 false）",
+            },
+        },
+    }
     effects = frozenset({"control"})
 
     def __init__(self, runtime: "Runtime") -> None:
@@ -267,8 +280,20 @@ class TeamCloseTool(Tool):
         team = self.runtime.active_team
         if team is None:
             return ToolResult("当前没有运行中的团队。")
-        team["hub"].finish("leader 主动收队")
-        report = team["summary"] or team["hub"].final_report()
+        hub: TeamHub = team["hub"]
+        open_tasks = [t for t in hub.tasks.values() if t.status in {"todo", "doing"}]
+        running = sum(1 for name, info in hub.members.items()
+                      if name != LEADER and info.get("status") == "running")
+        if open_tasks and not arguments.get("force"):
+            return ToolResult(
+                f"收队被拒绝：还有 {len(open_tasks)} 个未完成任务"
+                f"（{', '.join(t.id for t in open_tasks)}），"
+                f"{running} 个成员在运行。等它们交付后再收队；"
+                "确要放弃请带 force=true 重新调用。",
+                is_error=True,
+            )
+        hub.finish("leader 主动收队")
+        report = team["summary"] or hub.final_report()
         self.runtime.active_team = None
         return ToolResult("团队已收队。\n" + report)
 

@@ -164,9 +164,25 @@ class WorkspaceSearchTool(Tool):
         return ToolResult("\n".join(matches), {"count": len(matches)})
 
 
+# 默认继承的系统基础变量：让 git/python 等工具开箱可用。
+# 这些不是机密；密钥类变量仍然默认不继承（需显式 inherit_env 列出）。
+_DEFAULT_INHERIT = (
+    "PATH", "Path", "PATHEXT",
+    "SystemRoot", "WINDIR", "COMSPEC", "SYSTEMDRIVE", "SystemDrive",
+    "TEMP", "TMP", "TMPDIR",
+    "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "ProgramW6432",
+    "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "USERNAME",
+    "LOCALAPPDATA", "APPDATA",
+    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER",
+    "OS", "LANG", "LC_ALL",
+)
+
+
 def _environment(declared: dict[str, str], inherit: list[str]) -> dict[str, str]:
     result: dict[str, str] = {}
-    for key in inherit:
+    # 未显式给出 inherit_env 时继承安全基础集；给了就严格按清单继承。
+    keys = inherit if inherit else list(_DEFAULT_INHERIT)
+    for key in keys:
         if key in os.environ:
             result[key] = os.environ[key]
     for key, value in declared.items():
@@ -179,7 +195,11 @@ def _environment(declared: dict[str, str], inherit: list[str]) -> dict[str, str]
 
 class ProcessRunTool(Tool):
     name = "process_run"
-    description = "运行有边界限制的本地命令并捕获输出。"
+    description = (
+        "运行有边界限制的本地命令并捕获输出。默认继承系统基础环境"
+        "（PATH 等），git/python 等工具直接可用；可用 env 追加变量，"
+        "inherit_env 显式指定要继承的变量清单（密钥类变量须显式列出）。"
+    )
     parameters = {
         "type": "object",
         "properties": {

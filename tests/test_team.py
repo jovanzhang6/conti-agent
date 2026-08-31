@@ -437,5 +437,72 @@ permission_mode = "workspace"
         self.assertIn("没有运行中的团队", result.output[0])
 
 
+    async def test_parked_cycles_do_not_burn_turns(self) -> None:
+        """挂起等待不消耗工作轮数：远超轮数的挂起周期后成员仍能正常工作。"""
+        config = self._config()
+        provider = FakeProvider([
+            ProviderResponse(text="收到消息，开始工作"),
+        ])
+        hub = TeamHub(self.root / ".conti", team_id="park-burn")
+        hub.open_team([{"name": "w", "profile": "worker"}], [])
+        runner = TeamRunner(provider, ToolRegistry(), self.root,
+                            {p.name: p for p in config.profiles})
+        task = asyncio.ensure_future(runner.run(
+            hub, [{"name": "w", "profile": "worker"}],
+            park_timeout=0.05, team_timeout=1.0, max_member_turns=2,
+        ))
+        # 空转挂起约 15 个周期（远超 max_member_turns=2），不应被判轮数超限。
+        await asyncio.sleep(0.75)
+        self.assertNotEqual(hub.members["w"]["status"], "failed")
+        await asyncio.wait_for(task, timeout=10.0)
+        self.assertNotEqual(hub.members["w"]["status"], "failed")
+
+    async def test_close_interrupts_member_mid_turn(self) -> None:
+        """收队后成员在下一个请求边界停止，且不被标记为 failed。"""
+        config = self._config()
+
+        class SlowTalker(FakeProvider):
+            async def complete(self, messages, registry, stream_handler,
+                               tool_choice=None):
+                await asyncio.sleep(0.05)
+                return await super().complete(messages, registry,
+                                              stream_handler,
+                                              tool_choice=tool_choice)
+
+        provider = SlowTalker([ProviderResponse(text="继续思考")
+                               for _ in range(200)])
+        hub = TeamHub(self.root / ".conti", team_id="close-stop")
+        hub.open_team([{"name": "w", "profile": "worker"}],
+                      [{"id": "T1", "title": "长任务", "owner": "w"}])
+        runner = TeamRunner(provider, ToolRegistry(), self.root,
+                            {p.name: p for p in config.profiles})
+        task = asyncio.ensure_future(runner.run(
+            hub, [{"name": "w", "profile": "worker"}],
+            park_timeout=0.05, team_timeout=30.0, max_member_turns=50,
+        ))
+        await asyncio.sleep(0.4)
+        hub.finish("测试收队")
+        await asyncio.wait_for(task, timeout=10.0)
+        self.assertNotEqual(hub.members["w"]["status"], "failed")
+
+    async def test_journal_records_failure_reasons(self) -> None:
+        """成员失败原因必须落 journal（含原因），不许静默。"""
+        config = self._config()
+        provider = FakeProvider([
+            ProviderResponse(tool_calls=[ToolCall("c1", "team_send", {
+                "to": "nobody", "body": "x"})]),
+        ])
+        hub = TeamHub(self.root / ".conti", team_id="fail-journal")
+        hub.open_team([{"name": "w", "profile": "worker"}], [])
+        runner = TeamRunner(provider, ToolRegistry(), self.root,
+                            {p.name: p for p in config.profiles})
+        await runner.run(hub, [{"name": "w", "profile": "worker"}],
+                         park_timeout=0.05, team_timeout=10.0)
+        journal = hub.journal_path.read_text(encoding="utf-8")
+        self.assertIn("member.turn_failed", journal)
+        # 失败通知带着原因进入 leader 收件箱。
+        self.assertIn("异常退出", journal)
+
+
 if __name__ == "__main__":
     unittest.main()
