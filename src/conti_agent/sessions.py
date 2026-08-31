@@ -174,7 +174,10 @@ class SessionStore:
                         # 模型切换事件只用于审计和轨迹，不产生对话消息。
                         pass
                     else:
-                        raise SessionError(f"未知账本记录：{record['kind']}")
+                        # 未知事件类型（permission.decided、team.* 及未来新增）
+                        # 属于审计事件，不产生对话消息；账本必须前向兼容，
+                        # 跳过而不是拒绝回放。
+                        pass
         except json.JSONDecodeError as exc:
             raise SessionError(f"账本损坏于第 {line_number} 行：{exc}") from exc
         if metadata is None:

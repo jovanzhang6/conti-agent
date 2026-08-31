@@ -403,6 +403,19 @@ permission_mode = "workspace"
         self.assertTrue(spilled_path.exists())
         self.assertEqual(spilled_path.read_text(encoding="utf-8"), "y" * 500)
 
+    def test_ledger_load_skips_unknown_event_kinds(self) -> None:
+        """账本前向兼容：未知审计事件（如 permission.decided、team.*）
+        回放时跳过，消息不受影响，绝不抛"未知账本记录"。"""
+        store = SessionStore(self.root / ".conti")
+        session_id, _ = store.create(self.root, "前向兼容")
+        store.append_message(session_id, user_message("问题"))
+        store.append_event(session_id, "permission.decided",
+                           tool="workspace_write", allowed=True)
+        store.append_message(session_id, user_message("追问"))
+        store.append_event(session_id, "team.delivered", text="x")
+        _, resumed = store.load(session_id)
+        self.assertEqual([m["content"] for m in resumed], ["问题", "追问"])
+
     def test_ledger_compaction_roundtrip_with_summary_message(self) -> None:
         store = SessionStore(self.root / ".conti")
         session_id, _ = store.create(self.root, "压缩回放")

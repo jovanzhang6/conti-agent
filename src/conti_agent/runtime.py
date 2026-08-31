@@ -195,8 +195,6 @@ class TeamCreateTool(Tool):
                 summary = await runtime.team_runner.run(
                     hub, arguments["members"],
                     provider=runtime.provider,
-                    session_store=runtime.sessions,
-                    session_id=context.session_id,
                     park_timeout=runtime.team_park_timeout,
                     team_timeout=runtime.team_timeout,
                 )

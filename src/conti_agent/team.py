@@ -328,7 +328,6 @@ class TeamRunner:
 
     async def run(self, hub: TeamHub, members: list[dict[str, Any]], *,
                   provider: Any = None,
-                  session_store=None, session_id: str | None = None,
                   emit: Callable[[Any], None] | None = None,
                   max_member_turns: int = 8,
                   park_timeout: float = DEFAULT_PARK_TIMEOUT,
@@ -338,7 +337,7 @@ class TeamRunner:
             self.provider = provider
         member_tasks = [
             asyncio.create_task(self._member_loop(
-                hub, member, session_store=session_store, session_id=session_id,
+                hub, member,
                 emit=emit, max_member_turns=max_member_turns,
                 park_timeout=park_timeout,
             ))
@@ -355,7 +354,6 @@ class TeamRunner:
         return hub.final_report()
 
     async def _member_loop(self, hub: TeamHub, member: dict[str, Any], *,
-                           session_store=None, session_id: str | None = None,
                            emit: Callable[[Any], None] | None = None,
                            max_member_turns: int = 8,
                            park_timeout: float = DEFAULT_PARK_TIMEOUT) -> None:
@@ -371,7 +369,7 @@ class TeamRunner:
                       if t not in {"spawn_task", "request_input"}]
         registry = self.base_registry.filter(tool_names)
         registry.register(TeamSendTool(hub, name))
-        context = ToolContext(workspace=self.workspace, session_id=session_id,
+        context = ToolContext(workspace=self.workspace,
                               task_id=f"team:{name}", profile=str(member["profile"]),
                               services={})
         checker = PermissionChecker(profile.permission_mode,
@@ -412,17 +410,23 @@ class TeamRunner:
                 self.provider, registry, context,
                 AgentRunConfig(max_tool_iterations=profile.max_tool_iterations),
                 permission_checker=checker,
-                session_store=session_store, session_id=session_id,
+                # 成员对话不落 leader 会话账本：混入会污染 leader 的
+                # 消息回放序列；团队审计由 hub journal 与 leader 账本
+                # 里的 permission/team 事件承担。
             )
             try:
                 async for item in agent.run(messages):
                     if emit is not None:
                         emit(item)
             except Exception as exc:
-                # 机制级异常：自动重试一次（全新对话 + 摘要），再失败交队长。
+                # 机制级异常：自动重试一次（保留任务简报 + 异常摘要），
+                # 再失败交队长。
                 try:
+                    brief = messages[1] if len(messages) > 1 \
+                        else user_message(f"任务板：{hub.board_digest()}")
                     retry_messages = [
                         messages[0],
+                        brief,
                         user_message(f"你上一轮因异常中断：{exc}。"
                                      f"任务板：{hub.board_digest()}。继续你的任务。"),
                     ]
@@ -430,7 +434,6 @@ class TeamRunner:
                         self.provider, registry, context,
                         AgentRunConfig(max_tool_iterations=profile.max_tool_iterations),
                         permission_checker=checker,
-                        session_store=session_store, session_id=session_id,
                     )
                     async for item in retry_agent.run(retry_messages):
                         if emit is not None:
