@@ -89,8 +89,11 @@ command = ["python", "-c", "print('{}')"]
             encoding="utf-8",
         )
         # home local 档（密钥等本地覆盖）也参与合并。
+        # 覆盖是按同名整块替换：local 档需重复完整字段。
         (home / ".conti-agent" / "config.local.toml").write_text(
-            '[[provider]]\nname = "p1"\napi_key = "home-secret"\n',
+            '[[provider]]\nname = "p1"\nprotocol = "fake"\n'
+            'base_url = "local://a"\nmodel = "global-model"\n'
+            'api_key = "home-secret"\n',
             encoding="utf-8",
         )
 
