@@ -49,7 +49,10 @@
 pip install -e .[tui]
 ```
 
-在工作目录准备配置 `.conti/config.toml`：
+配置分两层，项目级覆盖全局：
+
+- **全局**：`~/.conti-agent/config.toml`（可选 `config.local.toml` 存密钥）——配一次，任何目录都能运行；
+- **项目**：`<工作区>/.conti/config.toml`（+ `config.local.toml`）——按名称覆盖全局的 provider/profile。
 
 ```toml
 [[provider]]
@@ -57,7 +60,7 @@ name = "deepseek"
 protocol = "openai-compat"
 base_url = "https://api.deepseek.com"
 model = "deepseek-v4-flash"
-api_key_env = "DEEPSEEK_API_KEY"   # 或用 .conti/config.local.toml 存明文 Key
+api_key_env = "DEEPSEEK_API_KEY"   # 或在 config.local.toml 存明文 api_key
 context_window = 1000000
 max_output_tokens = 8192
 

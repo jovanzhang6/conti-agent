@@ -195,14 +195,24 @@ def merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
     return base
 
 
-def load_config(path: Path | None = None) -> AppConfig:
-    """默认按 项目局部 > 项目 > 用户目录 的顺序合并配置。"""
+def load_config(path: Path | None = None, *,
+                home: Path | None = None,
+                project: Path | None = None) -> AppConfig:
+    """按 项目局部 > 项目 > 用户全局 的优先级合并配置。
+
+    全局配置（~/.conti-agent/）让程序脱离项目目录独立运行；
+    项目级 .conti/ 按名称覆盖全局的 provider/profile，追加 hook。
+    home / project 参数供测试注入，缺省分别取用户主目录与当前目录。
+    """
     if path is not None:
         return load_single(path)
+    home_dir = home or Path.home()
+    project_dir = project or Path.cwd()
     candidates = [
-        Path.home() / ".conti-agent" / "config.toml",
-        Path.cwd() / ".conti" / "config.toml",
-        Path.cwd() / ".conti" / "config.local.toml",
+        home_dir / ".conti-agent" / "config.toml",
+        home_dir / ".conti-agent" / "config.local.toml",
+        project_dir / ".conti" / "config.toml",
+        project_dir / ".conti" / "config.local.toml",
     ]
     config: AppConfig | None = None
     for candidate in candidates:
@@ -210,5 +220,9 @@ def load_config(path: Path | None = None) -> AppConfig:
             loaded = load_single(candidate)
             config = loaded if config is None else merge_config(config, loaded)
     if config is None:
-        raise ConfigurationError("未找到 .conti/config.toml 或用户级配置")
+        raise ConfigurationError(
+            "未找到任何配置文件。二选一：\n"
+            "  1) 全局：把 config.toml 放到 ~/.conti-agent/（任何目录都能运行）；\n"
+            "  2) 项目：把 config.toml 放到 <工作区>/.conti/（可另加 config.local.toml 存密钥，会覆盖全局）。"
+        )
     return config

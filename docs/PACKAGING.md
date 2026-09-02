@@ -1,14 +1,27 @@
 # conti-agent Windows exe 打包
 
+## 0. 打包模式决策（已定，长期有效）
+
+**正式发布一律 onefile 单文件**（`dist\conti-agent.exe`）。曾试验过
+onedir（启动稍快、杀毒误报少），但单文件才是产品形态：一个 exe 拷到
+任何工作目录即可运行，不要求用户搬运目录结构。onedir 已从构建脚本移除，
+不要再改回。若未来因启动性能重新评估，必须先更新本节和 IMPLEMENTATION.md。
+
 ## 1. 目标
 
-发布版只要求用户拿到一个可执行文件和一个本地配置：
+发布版只要求用户拿到一个可执行文件。配置二选一：
 
 ```text
+# 方式 A（推荐）：全局配置，任何目录都能运行
+~/.conti-agent/config.toml        # providers / runtime / profiles
+~/.conti-agent/config.local.toml  # 可选：密钥等本地覆盖
+
+# 方式 B：项目级配置（可覆盖全局）
 workspace/
   conti-agent.exe
   .conti/
-    config.local.toml
+    config.toml
+    config.local.toml   # 密钥放这里，会覆盖全局同名 provider
 ```
 
 不需要安装 Python、创建 venv、设置 `PYTHONPATH` 或运行包管理器。
@@ -36,7 +49,7 @@ cd D:\path\to\workspace
 .\conti-agent.exe
 ```
 
-前提是当前目录存在 `.conti/config.local.toml` 或 `.conti/config.toml`。
+配置解析顺序（后者覆盖前者）：`~/.conti-agent/config.toml` → `~/.conti-agent/config.local.toml` → `.conti/config.toml` → `.conti/config.local.toml`。全局配置存在时，无需任何项目级 `.conti`。
 
 本地直用配置：
 

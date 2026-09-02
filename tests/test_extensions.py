@@ -65,6 +65,49 @@ command = ["python", "-c", "print('{}')"]
 """, encoding="utf-8")
         return path
 
+    def test_load_config_layering_global_and_project(self) -> None:
+        """全局配置独立可用；项目级按名称覆盖全局；home local 档参与合并。"""
+        from conti_agent.config import load_config
+
+        home = Path(self._temporary.name) / "home"
+        project = Path(self._temporary.name) / "proj"
+        (home / ".conti-agent").mkdir(parents=True)
+        (project / ".conti").mkdir(parents=True)
+        (home / ".conti-agent" / "config.toml").write_text(
+            '[[provider]]\nname = "p1"\nprotocol = "fake"\n'
+            'base_url = "local://a"\nmodel = "global-model"\n'
+            '[[profile]]\nname = "worker"\nsystem_prompt = "全局"\n'
+            '[runtime]\npermission_mode = "read_only"\n',
+            encoding="utf-8",
+        )
+        # 项目级覆盖同名 provider，新增第二个 provider。
+        (project / ".conti" / "config.toml").write_text(
+            '[[provider]]\nname = "p1"\nprotocol = "fake"\n'
+            'base_url = "local://b"\nmodel = "project-model"\n'
+            '[[provider]]\nname = "p2"\nprotocol = "fake"\n'
+            'base_url = "local://c"\nmodel = "m2"\n',
+            encoding="utf-8",
+        )
+        # home local 档（密钥等本地覆盖）也参与合并。
+        (home / ".conti-agent" / "config.local.toml").write_text(
+            '[[provider]]\nname = "p1"\napi_key = "home-secret"\n',
+            encoding="utf-8",
+        )
+
+        # 只有全局 → 可独立运行。
+        global_only = load_config(home=home, project=project / "__missing__")
+        self.assertEqual([p.name for p in global_only.providers], ["p1"])
+        self.assertEqual(global_only.providers[0].model, "global-model")
+
+        # 全局 + 项目 → 项目覆盖同名，追加新名，profile/runtime 继承全局。
+        merged = load_config(home=home, project=project)
+        by_name = {p.name: p for p in merged.providers}
+        self.assertEqual(by_name["p1"].model, "project-model")
+        self.assertEqual(by_name["p1"].api_key, "home-secret")
+        self.assertEqual(by_name["p2"].model, "m2")
+        self.assertEqual([p.name for p in merged.profiles], ["worker"])
+        self.assertEqual(merged.runtime.permission_mode, "read_only")
+
     def test_config_parse_merge_and_secret(self) -> None:
         path = self.write_config()
         config = load_single(path)

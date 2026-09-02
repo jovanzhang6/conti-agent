@@ -594,6 +594,18 @@ python -m conti_agent.cli --config .conti/config.toml chat
 | exe TUI 流式任务 | passed，USER/ASSISTANT 消息和 token 更新 |
 | exe TUI 退出 | passed，`Ctrl+Q` 后终端恢复 |
 
+### 打包与配置架构决策（2026-09-02，长期有效）
+
+1. **打包一律 onefile**（`dist\conti-agent.exe`）。曾短暂切换 onedir，
+   已回退并从构建脚本移除：单文件是产品形态（一个 exe + 全局配置即可运行）。
+   详见 docs/PACKAGING.md 第 0 节，不要再改回 onedir。
+2. **配置双层架构**（对标 codex/claude code）：
+   - 全局 `~/.conti-agent/config.toml`（+ 可选 `config.local.toml` 存密钥）；
+   - 项目级 `<工作区>/.conti/config.toml`（+ `config.local.toml`）；
+   - 解析顺序后者覆盖前者；全局存在时项目目录无需 `.conti` 即可运行；
+   - `load_config(home=, project=)` 支持注入路径供测试。
+   已在干净目录用 onefile exe + 仅全局配置跑通真实模型。
+
 ### 已知限制
 
 1. 当前只发布 Windows x64；
