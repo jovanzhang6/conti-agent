@@ -862,6 +862,22 @@ class ContiTui:
         ]
 
     _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    _PERMISSION_LABELS = {"read_only": "只读", "workspace": "标准", "trusted": "放行"}
+
+    def _cycle_permission_mode(self) -> str:
+        """权限档位循环切换：read_only → workspace → trusted。"""
+        from .permissions import MODE_CHOICES
+        current = self.runtime.get_permission_mode()
+        nxt = MODE_CHOICES[(MODE_CHOICES.index(current) + 1) % len(MODE_CHOICES)]
+        mode = self.runtime.set_permission_mode(nxt)
+        self.state.runtime_info = self.runtime.describe()
+        label = self._PERMISSION_LABELS.get(mode, mode)
+        self.state.add_system(f"权限档位已切换：{mode}（{label}）——立即生效")
+        self.invalidate()
+        return mode
+
+    def _permission_click(self, mouse_event: Any) -> None:
+        self._cycle_permission_mode()
 
     def _team_fragments(self) -> list[tuple[str, str]]:
         """团队动效段：运行中的子 agent 计数 + 旋转指示。"""
@@ -877,23 +893,35 @@ class ContiTui:
             ("class:status-sep", "│"),
         ]
 
+    def _permission_chip(self) -> tuple[str, str, Any] | None:
+        """状态栏的权限档位芯片：点击循环切换（codex 风格）。"""
+        get_mode = getattr(self.runtime, "get_permission_mode", None)
+        if not callable(get_mode):
+            return None
+        mode = get_mode()
+        label = self._PERMISSION_LABELS.get(mode, mode)
+        return ("class:perm-chip", f" ⛨ 权限:{label} ", self._permission_click)
+
     def _model_status_fragments(self) -> list[tuple[str, str]]:
         style = "class:status-busy" if self.state.busy else "class:status-idle"
-        return [*(self._team_fragments()), (style, f" {self.state.status} ")]
+        chip = self._permission_chip()
+        parts: list[tuple[str, str]] = []
+        if chip is not None:
+            parts.append(chip)
+        parts.append((style, f" {self.state.status} "))
+        return [*(self._team_fragments()), *parts]
 
     def _shortcut_fragments(self) -> list[tuple[str, str]]:
         return [
-            ("class:status-key", " Enter 发送 "),
-            ("class:status-sep", "│"),
-            ("class:status-key", " Ctrl+C 取消 "),
-            ("class:status-sep", "│"),
-            ("class:status-key", " Ctrl+B 面板 "),
-            ("class:status-sep", "│"),
-            ("class:status-key", " Ctrl+Q 退出 "),
-            ("class:status-sep", "│"),
-            ("class:status-key", " PageUp/PageDown 翻页 "),
+            ("class:status-key", " Ctrl+C 中断 "),
             ("class:status-sep", "│"),
             ("class:status-key", " Ctrl+O 详情 "),
+            ("class:status-sep", "│"),
+            ("class:status-key", " PgUp/PgDn 翻页 "),
+            ("class:status-sep", "│"),
+            ("class:status-key", " 点击权限切换 "),
+            ("class:status-sep", "│"),
+            ("class:status-key", " Ctrl+Q 退出 "),
         ]
 
     def _status_fragments(self) -> list[tuple[str, str]]:
@@ -999,6 +1027,7 @@ class ContiTui:
             "scrollbar-track": "#1c2733",
             "activity-detail": "#71808f",
             "team-live": "#0ea5e9 bold",
+            "perm-chip": "bg:#12303f #7dd3fc bold",
             "md-heading": "#7dd3fc bold",
             "md-bold": "#eef5fa bold",
             "md-italic": "italic #b9c8d4",

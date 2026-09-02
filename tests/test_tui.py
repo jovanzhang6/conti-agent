@@ -50,7 +50,7 @@ class FakeRuntime:
             "provider": "test-provider",
             "model": "test-model",
             "protocol": "openai-compat",
-            "permission_mode": "workspace",
+            "permission_mode": self.permission_mode,
             "workspace": "W",
             "tools": ["a", "b"],
         }
@@ -68,6 +68,16 @@ class FakeRuntime:
 
     def context_usage(self) -> tuple[int, int, int]:
         return 50_000, 1_000_000, 5
+
+    permission_mode = "workspace"
+
+    def get_permission_mode(self) -> str:
+        return self.permission_mode
+
+    def set_permission_mode(self, mode: str) -> str:
+        from conti_agent.permissions import normalize_mode
+        self.permission_mode = normalize_mode(mode)
+        return self.permission_mode
 
     def get_provider_info(self, name: str) -> dict[str, Any]:
         if name not in ("active", "other"):
@@ -532,8 +542,8 @@ class TuiTestCase(unittest.TestCase):
                             return_value=stub):
                 lines = render()
             # footer 贴在最后一行（不能按权重分走半屏留下大片空白）。
-            self.assertIn("Enter 发送", lines[23])
-            self.assertIn("Ctrl+O 详情", lines[23])
+            self.assertIn("Ctrl+Q 退出", lines[23])
+            self.assertIn("点击权限档切换", lines[23])
 
             # 收起状态：不含详情。
             self.assertFalse(any("文件内容片段" in line for line in lines))
@@ -559,6 +569,29 @@ class TuiTestCase(unittest.TestCase):
         # 开始行被原位更新为完成，不产生第二条。
         self.assertEqual(len(activity), 1)
         self.assertIn("已压缩早期历史为摘要", activity[0].text)
+
+
+    def test_permission_chip_click_cycles_modes(self) -> None:
+        """状态栏权限芯片：渲染模式名，点击循环切换并立即生效。"""
+        interface = ContiTui(FakeRuntime(), output=DummyOutput(), input=DummyInput())
+        fragments = interface._model_status_fragments()
+        chip = next(item for item in fragments
+                    if len(item) >= 2 and "权限:" in item[1])
+        self.assertIn("标准", chip[1])
+        self.assertTrue(callable(chip[2]))
+        # 点击一次：workspace -> trusted。
+        chip[2](None)
+        self.assertEqual(interface.runtime.get_permission_mode(), "trusted")
+        self.assertEqual(interface.state.runtime_info["permission_mode"],
+                         "trusted")
+        self.assertTrue(any("权限档位已切换" in m.text
+                            for m in interface.state.messages))
+        # 点击到 trusted 之后回到 read_only。
+        chip = next(item for item in interface._model_status_fragments()
+                    if len(item) >= 2 and "权限:" in item[1])
+        self.assertIn("放行", chip[1])
+        chip[2](None)
+        self.assertEqual(interface.runtime.get_permission_mode(), "read_only")
 
 
 def asyncio_run(awaitable: Any) -> None:
