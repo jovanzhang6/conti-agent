@@ -543,7 +543,7 @@ class TuiTestCase(unittest.TestCase):
                 lines = render()
             # footer 贴在最后一行（不能按权重分走半屏留下大片空白）。
             self.assertIn("Ctrl+Q 退出", lines[23])
-            self.assertIn("点击权限档切换", lines[23])
+            self.assertIn("点击权限切换", lines[23])
 
             # 收起状态：不含详情。
             self.assertFalse(any("文件内容片段" in line for line in lines))
