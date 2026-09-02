@@ -173,12 +173,32 @@ def load_single(path: Path) -> AppConfig:
     )
 
 
+def _merge_provider(base: ProviderConfig, override: ProviderConfig) -> ProviderConfig:
+    """同名覆盖时字段级继承：覆盖文件未填的字段（空串/0）保留旧值。
+
+    防止"项目里只改个 model，却把全局配好的 api_key 抹掉"这类事故。
+    """
+    merged = ProviderConfig(
+        name=override.name,
+        protocol=override.protocol or base.protocol,
+        base_url=override.base_url or base.base_url,
+        model=override.model or base.model,
+        api_key_env=override.api_key_env or base.api_key_env,
+        api_key=override.api_key or base.api_key,
+        context_window=override.context_window or base.context_window,
+        max_output_tokens=(override.max_output_tokens
+                           if override.max_output_tokens != 8192 or base.max_output_tokens == 8192
+                           else base.max_output_tokens),
+    )
+    return merged
+
+
 def merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
     """用局部配置覆盖同层同名字段，列表按名称替换或追加。"""
     for provider in override.providers:
         for index, item in enumerate(base.providers):
             if item.name == provider.name:
-                base.providers[index] = provider
+                base.providers[index] = _merge_provider(item, provider)
                 break
         else:
             base.providers.append(provider)
