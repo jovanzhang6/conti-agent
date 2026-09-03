@@ -25,6 +25,27 @@ DEFAULT_TEAM_TIMEOUT = 1_800.0
 class _TeamClosed(Exception):
     """收队打断成员回合的内部信号（pre_request_hook 抛出）。"""
 
+
+_TRUNCATION_MARKER = "max_output_tokens"
+
+
+def _retry_instruction(exc: Exception, hub: TeamHub) -> str:
+    """构造重试指令：截断类失败给硬性行为约束，其余透传原因。
+
+    把异常原文原样塞回提示词模型并不会真的改变行为；截断必须
+    转成明确的输出纪律，模型才会缩短单轮产出。
+    """
+    if _TRUNCATION_MARKER in str(exc):
+        return (
+            "系统指令：你上一轮的输出超过单轮上限被截断，本轮必须严格遵守：\n"
+            "1) 正文不超过 200 字，简短说明意图后立即调用工具；\n"
+            "2) 工具参数保持简短，禁止拼接超长命令行、超长正则或大段内容；\n"
+            "3) 把剩余工作拆成多个小步骤，每轮只做一小块，长交付分段发送。\n"
+            f"任务板：{hub.board_digest()}。从中断处继续。"
+        )
+    return (f"你上一轮因异常中断：{exc}。"
+            f"任务板：{hub.board_digest()}。继续你的任务。")
+
 TEAM_PROTOCOL = (
     "你是团队的一员。协作规则：\n"
     "1. 给队友发消息用 team_send(to=对方名字)；交付任务用 "
@@ -36,7 +57,11 @@ TEAM_PROTOCOL = (
     "不要空转，不要重复汇报。\n"
     "5. 你没有向用户提问的工具。需要用户决策时发 "
     "team_send(to=\"leader\", body=\"需要用户决策：…\"），由 leader 转问用户"
-    "并把答案带回来；在此之前先做不需要决策的部分。"
+    "并把答案带回来；在此之前先做不需要决策的部分。\n"
+    "6. 单轮输出纪律（违反会被输出上限截断、任务直接失败）：每轮正文不超过"
+    " 200 字，简短说明意图后立即调用工具；工具参数保持简短——搜索用精简"
+    "关键词，不要拼接超长命令行、超长正则或大段内容；长篇交付拆成多次 "
+    "team_send 分段发送。"
 )
 
 
@@ -523,8 +548,7 @@ class TeamRunner:
                     retry_messages = [
                         messages[0],
                         brief,
-                        user_message(f"你上一轮因异常中断：{exc}。"
-                                     f"任务板：{hub.board_digest()}。继续你的任务。"),
+                        user_message(_retry_instruction(exc, hub)),
                     ]
                     retry_agent = Agent(
                         self.provider, registry, context,

@@ -485,6 +485,24 @@ permission_mode = "workspace"
         await asyncio.wait_for(task, timeout=10.0)
         self.assertNotEqual(hub.members["w"]["status"], "failed")
 
+    def test_retry_instruction_directive_for_truncation(self) -> None:
+        """截断类失败的重试指令必须是硬性行为约束，而非异常转述。"""
+        from conti_agent.team import _retry_instruction
+
+        class FakeHub:
+            def board_digest(self):
+                return "任务板：T1○"
+
+        instruction = _retry_instruction(
+            Exception("你的上一轮输出在 max_output_tokens 处被截断"), FakeHub())
+        self.assertIn("不超过 200 字", instruction)
+        self.assertIn("拆成多个小步骤", instruction)
+        self.assertIn("任务板：T1○", instruction)
+        # 非截断类异常保持原样透传。
+        generic = _retry_instruction(Exception("连接失败"), FakeHub())
+        self.assertIn("连接失败", generic)
+        self.assertNotIn("200 字", generic)
+
     async def test_journal_records_failure_reasons(self) -> None:
         """成员失败原因必须落 journal（含原因），不许静默。"""
         config = self._config()
