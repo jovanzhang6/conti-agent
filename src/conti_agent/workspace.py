@@ -127,12 +127,16 @@ class Workspace:
             rendered = f"{lineno:6d}\t{line}"
             size_with_nl = len(rendered.encode("utf-8")) + 1
             if used + size_with_nl > max_bytes:
-                if lineno == start and out == []:
-                    # 单行超限：硬截该行，保证至少返回一行。
+                if lineno == start and not out:
+                    # 首行自身超限：硬截该行保证至少返回一行；
+                    # 本行已返回（截断版），下一页从下一行开始，
+                    # 否则 next_offset 指回本行会死循环。
                     rendered = rendered.encode("utf-8")[:max_bytes].decode(
                         "utf-8", errors="replace")
                     out.append(rendered)
-                next_offset = lineno
+                    next_offset = lineno + 1
+                else:
+                    next_offset = lineno
                 break
             out.append(rendered)
             used += size_with_nl

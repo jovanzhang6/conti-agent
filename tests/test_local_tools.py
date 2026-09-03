@@ -64,6 +64,20 @@ class LocalToolTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("line-10", tail.output)
         self.assertIsNone(tail.metadata["next_offset"])
 
+    async def test_read_lines_huge_single_line_advances(self) -> None:
+        """单行超过字节上限：返回截断首行，next_offset 指向下一行（防死循环）。"""
+        huge_line = "中" * 100_000  # 多字节字符，截断边界落在字符中间
+        await self.call(WorkspaceWriteTool(self.workspace),
+                        {"path": "src/huge.txt",
+                         "content": huge_line + "\n" + "tail\n"})
+        page = await self.call(WorkspaceReadTool(self.workspace),
+                               {"path": "src/huge.txt", "max_bytes": 1_000})
+        self.assertEqual(page.metadata["next_offset"], 2)
+        tail = await self.call(WorkspaceReadTool(self.workspace),
+                               {"path": "src/huge.txt", "offset": 2,
+                                "max_bytes": 1_000})
+        self.assertIn("tail", tail.output)
+
     async def test_read_lines_byte_cap(self) -> None:
         """单行/批量超字节上限：自动收缩并给出续读 offset，不报错。"""
         big_line = "x" * 500
