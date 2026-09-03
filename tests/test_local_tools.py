@@ -35,6 +35,48 @@ class LocalToolTestCase(unittest.IsolatedAsyncioTestCase):
             create_local_registry(self.workspace), ToolCall("t", tool.name, arguments), self.context
         )
 
+    async def test_read_lines_paging(self) -> None:
+        """workspace_read 分页：整读保真；部分读取带行号与续读 offset。"""
+        lines = [f"line-{i}" for i in range(1, 11)]
+        await self.call(WorkspaceWriteTool(self.workspace),
+                        {"path": "src/paged.txt", "content": "\n".join(lines) + "\n"})
+
+        # 整读（不指定 offset/limit）：返回原始文本，无行号。
+        whole = await self.call(WorkspaceReadTool(self.workspace),
+                                {"path": "src/paged.txt"})
+        self.assertEqual(whole.output, "\n".join(lines) + "\n")
+        self.assertNotIn("     1\t", whole.output)
+
+        # 分页：offset=3 limit=4 → 第 3–6 行，带行号，提示续读。
+        page = await self.call(WorkspaceReadTool(self.workspace),
+                               {"path": "src/paged.txt", "offset": 3, "limit": 4})
+        self.assertIn("     3\tline-3", page.output)
+        self.assertIn("     6\tline-6", page.output)
+        self.assertNotIn("line-7", page.output)
+        self.assertIn("offset=7", page.output)
+        self.assertEqual(page.metadata["next_offset"], 7)
+        self.assertEqual(page.metadata["total_lines"], 10)
+
+        # 按续读参数读到末尾：不再有续读提示。
+        tail = await self.call(WorkspaceReadTool(self.workspace),
+                               {"path": "src/paged.txt", "offset": 7, "limit": 4})
+        self.assertIn("     7\tline-7", tail.output)
+        self.assertIn("line-10", tail.output)
+        self.assertIsNone(tail.metadata["next_offset"])
+
+    async def test_read_lines_byte_cap(self) -> None:
+        """单行/批量超字节上限：自动收缩并给出续读 offset，不报错。"""
+        big_line = "x" * 500
+        await self.call(WorkspaceWriteTool(self.workspace),
+                        {"path": "src/big.txt",
+                         "content": "\n".join(big_line for _ in range(6)) + "\n"})
+        page = await self.call(WorkspaceReadTool(self.workspace),
+                               {"path": "src/big.txt", "limit": 100,
+                                "max_bytes": 800})
+        self.assertLessEqual(len(page.output.encode("utf-8")), 800 + 200)
+        self.assertIsNotNone(page.metadata["next_offset"])
+        self.assertIn("offset=", page.output)
+
     async def test_read_write_edit(self) -> None:
         written = await self.call(WorkspaceWriteTool(self.workspace),
                                   {"path": "src/a.txt", "content": "hello\n"})

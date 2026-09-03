@@ -13,12 +13,22 @@ from .workspace import Workspace
 
 class WorkspaceReadTool(Tool):
     name = "workspace_read"
-    description = "读取工作区内有大小限制的 UTF-8 文本文件。"
+    description = (
+        "读取工作区内 UTF-8 文本文件，支持按行分页：offset=起始行（从 1 起），"
+        "limit=行数（默认 2000）。小文件整读返回；部分返回时自动带行号并在结尾"
+        "给出续读 offset，按提示的参数继续读即可。目录请用 workspace_list。"
+        "读文件请一律使用本工具，不要用 python/type/findstr 读文件。"
+    )
     parameters = {
         "type": "object",
         "properties": {
             "path": {"type": "string"},
-            "max_bytes": {"type": "integer", "minimum": 1},
+            "offset": {"type": "integer", "minimum": 1,
+                       "description": "起始行号（从 1 起）"},
+            "limit": {"type": "integer", "minimum": 1,
+                      "description": "本次最多读取的行数"},
+            "max_bytes": {"type": "integer", "minimum": 1,
+                          "description": "单次返回的字节上限（默认 256000）"},
         },
         "required": ["path"],
     }
@@ -28,13 +38,13 @@ class WorkspaceReadTool(Tool):
         self.workspace = workspace
 
     async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
-        max_bytes = arguments.get("max_bytes", 256_000)
-        content, size = self.workspace.read_text(arguments["path"], max_bytes=max_bytes)
-        return ToolResult(content, {
-            "path": self.workspace.relative_display(self.workspace.resolve(arguments["path"])),
-            "size": size,
-            "truncated": False,
-        })
+        block, meta = self.workspace.read_lines(
+            arguments["path"],
+            offset=int(arguments.get("offset", 1)),
+            limit=int(arguments.get("limit", 2_000)),
+            max_bytes=int(arguments.get("max_bytes", 256_000)),
+        )
+        return ToolResult(block, meta)
 
 
 class WorkspaceWriteTool(Tool):

@@ -56,22 +56,104 @@ class Workspace:
             return str(path)
 
     def read_text(self, value: str | Path, *, max_bytes: int = 256_000) -> tuple[str, int]:
+        """读取文本文件；超过 max_bytes 时返回前 max_bytes 字节（截断不报错）。
+
+        截断按字节切，边界处的多字节字符以 replace 容错解码；
+        未截断的文件仍严格校验 UTF-8。
+        """
         path = self.resolve(value)
         if not path.exists():
             raise ToolValidationError(f"file does not exist: {self.relative_display(path)}")
         if not path.is_file():
-            raise ToolValidationError(f"path is not a file: {self.relative_display(path)}")
+            hint = ("path is a directory（用 workspace_list 列目录）"
+                    if path.is_dir() else "path is not a file")
+            raise ToolValidationError(f"{hint}: {self.relative_display(path)}")
         size = path.stat().st_size
-        if size > max_bytes:
-            raise ToolValidationError(
-                f"file is too large: {size} bytes exceeds {max_bytes}"
-            )
+        truncated = size > max_bytes
+        # 字节级读取对齐 max_bytes 语义；字节流不经过换行转义，保留源格式。
+        with path.open("rb") as handle:
+            data = handle.read(max_bytes) if truncated else handle.read()
+        if truncated:
+            return data.decode("utf-8", errors="replace"), size
         try:
-            # newline="" 保留源文件中的 CRLF/LF，编辑时不会意外改写换行格式。
-            with path.open("r", encoding="utf-8", newline="") as handle:
-                return handle.read(), size
+            return data.decode("utf-8"), size
         except UnicodeDecodeError as exc:
             raise ToolValidationError(f"file is not UTF-8 text: {exc}") from exc
+
+    def read_lines(self, value: str | Path, *, offset: int = 1,
+                   limit: int = 2_000, max_bytes: int = 256_000) -> tuple[str, dict[str, Any]]:
+        """按行分页读取文本文件（行号从 1 起）。
+
+        返回 (文本块, 元数据)。文本块超出 max_bytes 时自动收缩；
+        未读到文件末尾时元数据带 next_offset 供续读。
+        部分返回时每行带 6 位行号前缀（仅供定位，编辑匹配时不要包含）。
+        """
+        path = self.resolve(value)
+        if not path.exists():
+            raise ToolValidationError(f"file does not exist: {self.relative_display(path)}")
+        if not path.is_file():
+            hint = ("path is a directory（用 workspace_list 列目录）"
+                    if path.is_dir() else "path is not a file")
+            raise ToolValidationError(f"{hint}: {self.relative_display(path)}")
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            data = handle.read()
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ToolValidationError(f"file is not UTF-8 text: {exc}") from exc
+        lines = text.splitlines()
+        total = len(lines)
+        start = max(1, int(offset))
+        end = min(total, start + max(1, int(limit)) - 1)
+        # 需要分页的判定：显式翻页、行数超限或字节数超限。
+        needs_paging = start > 1 or end < total or size > max_bytes
+        if not needs_paging:
+            # 整读返回原始文本（保留换行等精确字节），供编辑工具精确匹配。
+            meta: dict[str, Any] = {
+                "path": self.relative_display(path),
+                "size": size,
+                "total_lines": total,
+                "start": 1 if total else 0,
+                "end": total,
+                "next_offset": None,
+            }
+            return text, meta
+        used = 0
+        out: list[str] = []
+        next_offset: int | None = None
+        for lineno in range(start, end + 1):
+            line = lines[lineno - 1]
+            rendered = f"{lineno:6d}\t{line}"
+            size_with_nl = len(rendered.encode("utf-8")) + 1
+            if used + size_with_nl > max_bytes:
+                if lineno == start and out == []:
+                    # 单行超限：硬截该行，保证至少返回一行。
+                    rendered = rendered.encode("utf-8")[:max_bytes].decode(
+                        "utf-8", errors="replace")
+                    out.append(rendered)
+                next_offset = lineno
+                break
+            out.append(rendered)
+            used += size_with_nl
+        # 字节帽没触发、但请求窗口之外还有行：同样给出续读 offset。
+        if next_offset is None and end < total:
+            next_offset = end + 1
+        meta: dict[str, Any] = {
+            "path": self.relative_display(path),
+            "size": size,
+            "total_lines": total,
+            "start": start if out else 0,
+            "end": (start + len(out) - 1) if out else 0,
+            "next_offset": next_offset,
+        }
+        block = "\n".join(out)
+        if next_offset is not None:
+            block += (f"\n\n[分页] 共 {total} 行，本次返回 {meta['start']}–{meta['end']} 行。"
+                      f"继续读取：workspace_read(path, offset={next_offset}, "
+                      f"limit={max(1, int(limit))})。行号仅供定位，workspace_edit "
+                      "匹配时不要包含行号。")
+        return block, meta
 
     def write_text(self, value: str | Path, content: str, *,
                    max_bytes: int = 1_000_000) -> int:
