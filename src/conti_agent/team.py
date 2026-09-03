@@ -228,6 +228,10 @@ class TeamHub:
         if member in self.members:
             changed = self.members[member]["status"] != status
             self.members[member]["status"] = status
+            # 状态持久化：团队关闭后再无其他写入，不落盘的话
+            # state.json 会把已退出成员永远留在旧状态上。
+            if changed:
+                self._save_state()
             # 运行中是常态不播报；其余状态变化即时推给 UI 动效。
             if changed and status != "running" and self.on_member_status:
                 label = self._STATUS_LABELS.get(status, status)
@@ -275,6 +279,11 @@ class TeamHub:
 
     def finish(self, reason: str) -> None:
         self.status = "closed"
+        # 终态清账：收队后不允许任何成员（含 leader 占位）停留在
+        # running/parked。直接改内存不播报——"已收队"通知本身已足够。
+        for info in self.members.values():
+            if info.get("status") in {"running", "parked"}:
+                info["status"] = "done"
         self._journal("team.closed", reason=reason)
         self._save_state()
         for event in self.wake.values():
@@ -393,6 +402,9 @@ class TeamRunner:
         done, pending = await asyncio.wait(member_tasks, timeout=team_timeout)
         for task in pending:
             task.cancel()
+        if pending:
+            # 等取消落地：成员退出路径会写终态并落盘，再收队才不失真。
+            await asyncio.wait(pending, timeout=5)
         if pending:
             reason = "团队超时"
         else:
@@ -613,5 +625,12 @@ class TeamRunner:
             # 或补充上下文，成员不自行退场（团队超时保险丝统一兜底）。
             hub.set_status(name, "parked")
             await hub.wait_wake(name, timeout=park_timeout)
+            if hub.status != "open":
+                # 收队唤醒：安静退场，终态不留在 running。
+                hub.set_status(name, "done")
+                return
             hub.set_status(name, "running")
+        # 循环退出（团队已收队）：终态兜底，不留在 running。
+        if hub.status != "open":
+            hub.set_status(name, "done")
 

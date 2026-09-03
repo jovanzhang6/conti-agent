@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import asyncio
 import tempfile
 import unittest
@@ -484,6 +486,43 @@ permission_mode = "workspace"
         hub.finish("测试收队")
         await asyncio.wait_for(task, timeout=10.0)
         self.assertNotEqual(hub.members["w"]["status"], "failed")
+
+    def test_finish_sweeps_running_members_and_persists(self) -> None:
+        """收队清账：running 成员（含 leader 占位）扫成 done，并落盘。"""
+        hub = TeamHub(self.root / ".conti", team_id="sweep")
+        hub.open_team([{"name": "a", "profile": "worker"},
+                       {"name": "b", "profile": "worker"}], [])
+        hub.set_status("a", "parked")
+        # b 停在 running（中途被收队）；leader 占位也是 running。
+        hub.finish("测试收队")
+        statuses = {name: info["status"] for name, info in hub.members.items()}
+        self.assertTrue(all(s == "done" for s in statuses.values()), statuses)
+        # 状态必须写进 state.json（磁盘可见），不能只改内存。
+        on_disk = json.loads((hub.state_path).read_text(encoding="utf-8"))
+        self.assertTrue(all(info["status"] == "done"
+                            for info in on_disk["members"].values()))
+
+    def test_set_status_persists_to_state_json(self) -> None:
+        """状态变化必须落盘，团队关闭后磁盘不再更新也不会失真。"""
+        hub = TeamHub(self.root / ".conti", team_id="persist")
+        hub.open_team([{"name": "w", "profile": "worker"}], [])
+        hub.set_status("w", "parked")
+        on_disk = json.loads((hub.state_path).read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["members"]["w"]["status"], "parked")
+
+    async def test_team_timeout_marks_members_done(self) -> None:
+        """团队超时取消成员：终态 done（不再标 running），且落盘。"""
+        config = self._config()
+        provider = FakeProvider([ProviderResponse(text="收到")])
+        hub = TeamHub(self.root / ".conti", team_id="timeout-done")
+        hub.open_team([{"name": "w", "profile": "worker"}], [])
+        runner = TeamRunner(provider, ToolRegistry(), self.root,
+                            {p.name: p for p in config.profiles})
+        await runner.run(hub, [{"name": "w", "profile": "worker"}],
+                         park_timeout=0.05, team_timeout=0.3)
+        self.assertEqual(hub.members["w"]["status"], "done")
+        on_disk = json.loads((hub.state_path).read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["members"]["w"]["status"], "done")
 
     def test_retry_instruction_directive_for_truncation(self) -> None:
         """截断类失败的重试指令必须是硬性行为约束，而非异常转述。"""
