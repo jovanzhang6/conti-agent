@@ -1154,8 +1154,22 @@ class ContiTui:
         self.invalidate()
 
     async def handle_command(self, prompt: str) -> None:
+        # /compact 耗时数秒（模型生成摘要）：先给"进行中"活动行，
+        # 完成后原位更新结果，不在对话流重复输出。
+        pending_compaction = None
+        if prompt.lstrip().lower().startswith("/compact"):
+            pending_compaction = self.state.append_tool_activity(
+                "⚙ 正在压缩上下文，模型生成摘要中…")
+            self.state.status = "正在压缩上下文"
+            self.viewport.scroll_to_bottom()
+            self.invalidate()
         context = self._command_context()
         result = await self.command_registry.execute(prompt, context)
+
+        if pending_compaction is not None:
+            first = result.output[0] if result.output else "完成"
+            pending_compaction.text = ("✓ 压缩完成：" if result.ok else "✗ ") + first
+            pending_compaction.render_cache = None
 
         if result.new_session_requested:
             self.state.session_id = "新会话"
@@ -1180,7 +1194,8 @@ class ContiTui:
 
         # clear 的输出要在清理后再显示；其余命令直接显示。
         # 多行输出合并为一条系统消息，避免每行都带 SYSTEM 标题。
-        if result.output:
+        # /compact 的结果已原位更新在活动行上，不再重复输出。
+        if result.output and pending_compaction is None:
             self.state.add_system("\n".join(result.output))
 
         # 命令输出要求可见，恢复跟随底部。

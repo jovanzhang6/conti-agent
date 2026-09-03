@@ -571,6 +571,45 @@ class TuiTestCase(unittest.TestCase):
         self.assertIn("已压缩早期历史为摘要", activity[0].text)
 
 
+    def test_compact_shows_progress_then_result(self) -> None:
+        """/compact：立即显示压缩中活动行，完成后原位更新，不重复输出。"""
+        import asyncio
+
+        async def scenario() -> None:
+            interface = ContiTui(FakeRuntime(), output=DummyOutput(),
+                                 input=DummyInput())
+            interface.state.session_id = "sess-1"
+
+            async def fake_compact(session_id: str) -> str:
+                await asyncio.sleep(0)
+                return "摘要内容" * 10
+
+            interface._compact_session = fake_compact
+            system_before = len([m for m in interface.state.messages
+                                 if m.role == "system"])
+            await interface.handle_command("/compact")
+            activity = [m for m in interface.state.messages if m.role == "activity"]
+            self.assertEqual(len(activity), 1)
+            self.assertTrue(activity[0].text.startswith("✓ 压缩完成"))
+            self.assertIn("摘要字数", activity[0].text)
+            # 结果只出现在活动行，不重复输出系统消息。
+            system_after = [m for m in interface.state.messages if m.role == "system"]
+            self.assertEqual(len(system_after), system_before)
+
+        asyncio_run(scenario())
+
+    def test_compact_error_shown_in_activity_line(self) -> None:
+        async def scenario() -> None:
+            interface = ContiTui(FakeRuntime(), output=DummyOutput(),
+                                 input=DummyInput())
+            await interface.handle_command("/compact")
+            activity = [m for m in interface.state.messages if m.role == "activity"]
+            self.assertEqual(len(activity), 1)
+            self.assertTrue(activity[0].text.startswith("✗"))
+            self.assertIn("还没有可压缩的磁盘会话", activity[0].text)
+
+        asyncio_run(scenario())
+
     def test_permission_chip_click_cycles_modes(self) -> None:
         """状态栏权限芯片：渲染模式名，点击循环切换并立即生效。"""
         interface = ContiTui(FakeRuntime(), output=DummyOutput(), input=DummyInput())
