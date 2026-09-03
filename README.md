@@ -76,7 +76,7 @@ conti-agent ask "..."  # 一次性任务
 conti-agent chat --line   # 无 TTY 环境的行式模式
 ```
 
-也可以直接运行构建好的单文件 `conti-agent.exe`（放到工作目录，与 `.conti` 同级），或用脚本自己构建：
+也可以直接运行构建好的单文件 `conti-agent.exe`（放到工作目录，与 `.conti` 同级，或仅靠全局配置）。构建脚本每次会把产物同时复制一份到项目根目录（`dist` 上一级，gitignore 内）：
 
 ```powershell
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\build_windows_exe.ps1

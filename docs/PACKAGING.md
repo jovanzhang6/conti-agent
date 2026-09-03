@@ -38,7 +38,9 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\build_windows_exe.ps1
 2. 安装 `.[tui]` 和 PyInstaller；
 3. 运行全量测试；
 4. 构建单文件控制台程序；
-5. 输出 `dist\conti-agent.exe`。
+5. 输出 `dist\conti-agent.exe`；
+6. 自动复制一份到项目根目录（dist 的上一级）`conti-agent.exe`，
+   已加入 .gitignore 不入库；根目录副本被占用时仅警告、不阻断构建。
 
 ## 3. 使用
 

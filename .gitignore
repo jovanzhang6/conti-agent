@@ -10,3 +10,4 @@ build-release/
 dist-release/
 conti-agent.spec
 .conti/
+/conti-agent.exe

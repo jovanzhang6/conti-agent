@@ -605,6 +605,9 @@ python -m conti_agent.cli --config .conti/config.toml chat
    - 解析顺序后者覆盖前者；全局存在时项目目录无需 `.conti` 即可运行；
    - `load_config(home=, project=)` 支持注入路径供测试。
    已在干净目录用 onefile exe + 仅全局配置跑通真实模型。
+3. **构建产物双份存放**：`dist\conti-agent.exe`（发布件）+ 项目根目录
+   `conti-agent.exe`（构建脚本自动复制，gitignore 内）——根目录副本与
+   `.conti` 同级，正好满足“项目配置覆盖全局”的日常布局。
 
 ### 已知限制
 

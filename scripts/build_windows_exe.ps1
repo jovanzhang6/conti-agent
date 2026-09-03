@@ -42,3 +42,14 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host ""
 Write-Host "发布文件：$ProjectRoot\dist\conti-agent.exe（单文件，可任意目录分发）"
 Write-Host "配置来源：~\.conti-agent\config.toml（全局）或工作目录 .conti\config.toml（项目覆盖）"
+
+# 产物副本：同步一份到 dist 上一级（项目根目录），方便直接使用。
+# 根目录的 conti-agent.exe 已加入 .gitignore，不会入库。
+$artifact = Join-Path $ProjectRoot "dist\conti-agent.exe"
+$copyDest = Join-Path $ProjectRoot "conti-agent.exe"
+try {
+  Copy-Item $artifact $copyDest -Force
+  Write-Host "副本已同步：$copyDest"
+} catch {
+  Write-Warning "副本同步失败（旧 exe 可能正在运行，可手动复制）：$($_.Exception.Message)"
+}
