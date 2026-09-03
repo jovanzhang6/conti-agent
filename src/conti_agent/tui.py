@@ -30,7 +30,7 @@ from prompt_toolkit.layout import (
 )
 from prompt_toolkit.formatted_text.utils import split_lines
 from prompt_toolkit.layout.controls import UIContent, UIControl
-from prompt_toolkit.mouse_events import MouseEventType, MouseEvent
+from prompt_toolkit.mouse_events import MouseButton, MouseEventType, MouseEvent
 from prompt_toolkit.widgets import TextArea
 from .activity import format_tool_completed, format_tool_started
 from .commands import CommandContext
@@ -565,6 +565,7 @@ class ScrollbarWindow(Window):
                  **kwargs: Any) -> None:
         super().__init__(ScrollbarControl(viewport, body_window), width=1, **kwargs)
         self.viewport = viewport
+        self._dragging = False
 
     def _mouse_handler(self, mouse_event: MouseEvent) -> Any:
         event_type = mouse_event.event_type
@@ -575,7 +576,19 @@ class ScrollbarWindow(Window):
         if event_type == MouseEventType.SCROLL_DOWN:
             viewport.scroll_down(3)
             return None
-        if event_type not in (MouseEventType.MOUSE_DOWN, MouseEventType.MOUSE_MOVE):
+        if event_type == MouseEventType.MOUSE_UP:
+            self._dragging = False
+            return None
+        # 按下=跳转到该位置并进入拖动；拖动中的 MOVE 跟随；
+        # 悬停的 MOVE（无按键）一律忽略，否则鼠标扫过就会误滚动。
+        if event_type == MouseEventType.MOUSE_DOWN:
+            self._dragging = True
+        elif event_type == MouseEventType.MOUSE_MOVE:
+            if not getattr(self, "_dragging", False):
+                return None
+            if mouse_event.button != MouseButton.LEFT:
+                return None
+        else:
             return NotImplemented
         info = self.render_info
         if info is None:
@@ -877,6 +890,10 @@ class ContiTui:
         return mode
 
     def _permission_click(self, mouse_event: Any) -> None:
+        # 片段鼠标处理器会收到悬停（MOUSE_MOVE）等全部事件；
+        # 只在松开（MOUSE_UP）时切换，悬停不触发。
+        if mouse_event is None or mouse_event.event_type != MouseEventType.MOUSE_UP:
+            return
         self._cycle_permission_mode()
 
     def _team_fragments(self) -> list[tuple[str, str]]:

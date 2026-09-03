@@ -579,8 +579,18 @@ class TuiTestCase(unittest.TestCase):
                     if len(item) >= 2 and "权限:" in item[1])
         self.assertIn("标准", chip[1])
         self.assertTrue(callable(chip[2]))
-        # 点击一次：workspace -> trusted。
-        chip[2](None)
+        # 悬停（MOUSE_MOVE）不切换。
+        from prompt_toolkit.data_structures import Point
+        from prompt_toolkit.mouse_events import (MouseButton, MouseEvent, MouseEventType)
+
+        def event(kind, button=MouseButton.NONE):
+            return MouseEvent(position=Point(0, 0), event_type=kind,
+                              button=button, modifiers=frozenset())
+
+        chip[2](event(MouseEventType.MOUSE_MOVE))
+        self.assertEqual(interface.runtime.get_permission_mode(), "workspace")
+        # 松开（MOUSE_UP）才切换：workspace -> trusted。
+        chip[2](event(MouseEventType.MOUSE_UP))
         self.assertEqual(interface.runtime.get_permission_mode(), "trusted")
         self.assertEqual(interface.state.runtime_info["permission_mode"],
                          "trusted")
@@ -590,8 +600,55 @@ class TuiTestCase(unittest.TestCase):
         chip = next(item for item in interface._model_status_fragments()
                     if len(item) >= 2 and "权限:" in item[1])
         self.assertIn("放行", chip[1])
-        chip[2](None)
+        chip[2](event(MouseEventType.MOUSE_UP))
         self.assertEqual(interface.runtime.get_permission_mode(), "read_only")
+
+    def test_scrollbar_hover_ignored_drag_works(self) -> None:
+        """滚动条：悬停（无按键 MOVE）不动作；按下跳转、按住拖动才跟随。"""
+        from prompt_toolkit.data_structures import Point
+        from prompt_toolkit.mouse_events import (MouseButton, MouseEvent, MouseEventType)
+
+        interface = ContiTui(FakeRuntime(), output=DummyOutput(), input=DummyInput())
+        viewport = interface.viewport
+        viewport.content_height = 100
+        viewport.window_height = 20
+        viewport.follow_bottom = False
+        viewport.scroll_offset = 80
+
+        sb = [w for w in interface.application.layout.find_all_windows()
+              if type(w).__name__ == "ScrollbarWindow"][0]
+
+        class Info:
+            window_height = 20
+            _y_offset = 0
+
+        sb.render_info = Info()
+
+        def event(kind, y, button=MouseButton.NONE):
+            return MouseEvent(position=Point(79, y), event_type=kind,
+                              button=button, modifiers=frozenset())
+
+        # 悬停扫过：什么都不该发生。
+        sb._mouse_handler(event(MouseEventType.MOUSE_MOVE, 10))
+        self.assertEqual(viewport.scroll_offset, 80)
+        self.assertTrue(viewport.follow_bottom is False)
+        # 按下：跳转到对应位置（y=10 → 轨道中部）。
+        sb._mouse_handler(event(MouseEventType.MOUSE_DOWN, 10, MouseButton.LEFT))
+        jumped = viewport.scroll_offset
+        self.assertNotEqual(jumped, 80)
+        # 悬停（无按键 MOVE）：不跟随。
+        viewport.scroll_offset = 0
+        sb._mouse_handler(event(MouseEventType.MOUSE_MOVE, 12))
+        self.assertEqual(viewport.scroll_offset, 0)
+        # 按住左键拖动：跟随位置（轨道中部 → 上下文中部之间）。
+        sb._mouse_handler(event(MouseEventType.MOUSE_MOVE, 12, MouseButton.LEFT))
+        dragged = viewport.scroll_offset
+        self.assertTrue(0 < dragged < 99, f"drag should move viewport, got {dragged}")
+        # 松开后悬停：不再跟随。
+        sb._mouse_handler(event(MouseEventType.MOUSE_UP, 12, MouseButton.LEFT))
+        viewport.scroll_offset = 5
+        sb._mouse_handler(event(MouseEventType.MOUSE_MOVE, 15))
+        self.assertEqual(viewport.scroll_offset, 5)
 
 
 def asyncio_run(awaitable: Any) -> None:
