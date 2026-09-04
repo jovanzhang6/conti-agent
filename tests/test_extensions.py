@@ -262,6 +262,30 @@ skills = {str(skills_enabled).lower()}
         return Runtime(load_single(config_path), self.root,
                        output_function=lambda text: None)
 
+    def test_profiles_enabled_gates_spawn_tool(self) -> None:
+        """profiles_enabled=False：不注册 spawn_task；默认开启时注册。"""
+        from conti_agent.runtime import Runtime
+        base = """
+[[provider]]
+name = "fake"
+protocol = "fake"
+base_url = "local://fake"
+model = "fake"
+[extensions]
+profiles = {flag}
+[runtime]
+permission_mode = "workspace"
+"""
+        for flag, expected in (("true", True), ("false", False)):
+            config_path = self.root / f"runtime-{flag}.toml"
+            config_path.write_text(base.replace("{flag}", flag), encoding="utf-8")
+            runtime = Runtime(load_single(config_path), self.root,
+                              output_function=lambda text: None)
+            registered = "spawn_task" in runtime.registry.names()
+            self.assertEqual(registered, expected, f"flag={flag}")
+            if expected:
+                self.assertIsNotNone(runtime.profile_runner)
+
     def test_skill_catalog_injected_into_system_prompt(self) -> None:
         runtime = self._skill_runtime()
         prompt = runtime._system_prompt()

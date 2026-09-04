@@ -324,14 +324,18 @@ class Runtime:
         self.memory = MemoryStore(self.root)
         self.registry.register(MemoryWriteTool(self.memory))
         self.registry.register(RequestInputTool(self._dispatch_input))
-        self.profile_runner = ProfileRunner(
-            self.provider,
-            self.registry,
-            self.workspace.root,
-            config.profiles,
-            config.runtime.permission_mode,
-        )
-        self.registry.register(SpawnTaskTool(self.profile_runner))
+        # profiles_enabled 真实生效：关闭时不构建 ProfileRunner、不注册
+        # spawn_task（与 skills_enabled 对 load_skill 的门控一致）。
+        self.profile_runner = None
+        if config.profiles_enabled:
+            self.profile_runner = ProfileRunner(
+                self.provider,
+                self.registry,
+                self.workspace.root,
+                config.profiles,
+                config.runtime.permission_mode,
+            )
+            self.registry.register(SpawnTaskTool(self.profile_runner))
         # Agent Team（HIGHLIGHTS 亮点 5）：队长侧工具 + 后台团队状态。
         self.team_runner = TeamRunner(
             self.provider, self.registry, self.workspace.root,

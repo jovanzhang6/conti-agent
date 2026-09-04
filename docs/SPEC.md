@@ -56,7 +56,7 @@ TUI 必须包含 Header、对话流、活动侧栏、任务输入区和 Footer�
 5. `Ctrl+Q` 退出；
 6. 会话命令可直接在输入框执行。
 
-支持 `/help`、`/new`、`/status`、`/sessions`、`/resume <id>`、`/compact`、`/clear`、`/exit`。行式界面仍支持行尾反斜杠续行。界面只负责输入输出，不拥有运行时策略。
+斜杠命令由 CommandRegistry 统一注册（当前 16 个）：`/help`、`/models`、`/model <name>`、`/status`、`/sessions`、`/resume <id>`、`/compact`、`/activity`、`/panel`、`/permission [mode]`、`/undo`、`/skills`、`/team`、`/new`、`/clear`、`/exit`。行式界面仍支持行尾反斜杠续行。界面只负责输入输出，不拥有运行时策略。
 
 ### 2.3 本地服务
 
