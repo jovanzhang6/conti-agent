@@ -304,6 +304,49 @@ permission_mode = "workspace"
         self.assertEqual(estimate_tokens("中文ab"), 3)
         self.assertEqual(estimate_tokens(""), 0)
 
+    def test_tool_result_char_limit_derived_from_window(self) -> None:
+        """落盘阈值按窗口推导：窗口 × 5%，夹在 1 万–20 万。"""
+        from conti_agent.context import ContextManager
+        self.assertEqual(
+            ContextManager(context_window=1_000_000).tool_result_char_limit,
+            50_000)
+        # 128K 窗口：5% 只有 6400，被下限 1 万托住。
+        self.assertEqual(
+            ContextManager(context_window=128_000).tool_result_char_limit,
+            10_000)
+        # 10M 窗口：50 万被上限 20 万压住。
+        self.assertEqual(
+            ContextManager(context_window=10_000_000).tool_result_char_limit,
+            200_000)
+
+    def test_spiller_limit_follows_window_on_provider_switch(self) -> None:
+        from conti_agent.config import load_single
+        from conti_agent.runtime import Runtime
+        config_path = self.root / "runtime.toml"
+        config_path.write_text(r"""
+[[provider]]
+name = "big"
+protocol = "fake"
+base_url = "local://fake"
+model = "fake"
+context_window = 1_000_000
+[[provider]]
+name = "small"
+protocol = "fake"
+base_url = "local://fake"
+model = "fake"
+context_window = 128_000
+[runtime]
+permission_mode = "workspace"
+""", encoding="utf-8")
+        runtime = Runtime(load_single(config_path), self.root,
+                          output_function=lambda text: None)
+        # 1M 窗口 → 阈值 5 万。
+        self.assertEqual(runtime.result_spiller.single_limit, 50_000)
+        # 切到 128K 窗口 → 阈值跟随缩到下限 1 万。
+        runtime.set_active_provider("small")
+        self.assertEqual(runtime.result_spiller.single_limit, 10_000)
+
     def test_compaction_trigger_and_usage_projection(self) -> None:
         manager = ContextManager(context_window=200_000, max_output_tokens=8_192)
         # 触发点 = 窗口 − max_output（答案预留）− 10% 窗口（估算安全垫）。

@@ -685,6 +685,10 @@ class Runtime:
     def _update_context_window(self, config: ProviderConfig) -> None:
         self.context_manager.context_window = config.context_window or 128_000
         self.context_manager.max_output_tokens = config.max_output_tokens
+        # 工具结果的落盘阈值由窗口推导（窗口 × 5%），模型切换自动跟随。
+        if getattr(self, "result_spiller", None) is not None:
+            self.result_spiller.single_limit = \
+                self.context_manager.tool_result_char_limit
 
     def describe(self) -> dict[str, object]:
         """返回终端界面需要显示的运行时状态，不包含密钥。"""

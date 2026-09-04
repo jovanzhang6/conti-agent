@@ -81,8 +81,11 @@ class Workspace:
             raise ToolValidationError(f"file is not UTF-8 text: {exc}") from exc
 
     def read_lines(self, value: str | Path, *, offset: int = 1,
-                   limit: int = 2_000, max_bytes: int = 256_000) -> tuple[str, dict[str, Any]]:
+                   limit: int = 600, max_bytes: int = 256_000) -> tuple[str, dict[str, Any]]:
         """按行分页读取文本文件（行号从 1 起）。
+
+        默认 limit=600：600 行 × ~80 字节/行 ≈ 48KB，落在单结果上下文
+        预算（窗口 × 5%）内，默认页不触发落盘替换。
 
         返回 (文本块, 元数据)。文本块超出 max_bytes 时自动收缩；
         未读到文件末尾时元数据带 next_offset 供续读。

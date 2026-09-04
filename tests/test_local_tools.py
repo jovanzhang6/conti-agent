@@ -78,6 +78,17 @@ class LocalToolTestCase(unittest.IsolatedAsyncioTestCase):
                                 "max_bytes": 1_000})
         self.assertIn("tail", tail.output)
 
+    async def test_read_default_limit_is_600(self) -> None:
+        """默认 limit=600：600 行 × ~80B ≈ 48KB，落在单结果预算内不触发落盘。"""
+        lines = [f"line-{i}" for i in range(1, 1001)]
+        await self.call(WorkspaceWriteTool(self.workspace),
+                        {"path": "src/def.txt", "content": "\n".join(lines) + "\n"})
+        page = await self.call(WorkspaceReadTool(self.workspace),
+                               {"path": "src/def.txt"})
+        self.assertEqual(page.metadata["end"], 600)
+        self.assertEqual(page.metadata["next_offset"], 601)
+        self.assertIn("offset=601", page.output)
+
     async def test_read_lines_byte_cap(self) -> None:
         """单行/批量超字节上限：自动收缩并给出续读 offset，不报错。"""
         big_line = "x" * 500

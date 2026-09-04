@@ -141,6 +141,16 @@ class ContextManager:
         margin = self.max_output_tokens + int(self.context_window * COMPACT_MARGIN_RATIO)
         return max(4096, self.context_window - margin)
 
+    @property
+    def tool_result_char_limit(self) -> int:
+        """单个工具结果进入上下文的字符预算：窗口 × 5%，夹在 1 万–20 万。
+
+        按保守换算（1 字符 ≈ 1 token）：单结果超过窗口 5% 时，模型对那段
+        内容的注意力质量下降且挤压对话空间。ResultSpiller 的落盘阈值由它
+        推导，随模型切换（窗口变化）自动跟随。
+        """
+        return max(10_000, min(200_000, int(self.context_window * 0.05)))
+
     def observe_usage(self, input_tokens: int, output_tokens: int,
                       observed_count: int | None = None) -> None:
         self.last_input_tokens = input_tokens
